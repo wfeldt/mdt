@@ -78,6 +78,10 @@ struct {
     unsigned intr:1;
     unsigned acc:1;
     unsigned rawptable:1;
+    unsigned dump:1;
+    unsigned dumpmem:1;
+    unsigned dumpattr:1;
+    unsigned dumpregs:1;
   } show;
 
   unsigned raw:1;
@@ -118,6 +122,10 @@ int main(int argc, char **argv)
           else if(!strcmp(t, "io")) opt.show.io = u;
           else if(!strcmp(t, "intr")) opt.show.intr = u;
           else if(!strcmp(t, "acc")) opt.show.acc = u;
+          else if(!strcmp(t, "dump")) opt.show.dump = u;
+          else if(!strcmp(t, "dump.mem")) opt.show.dumpmem = u;
+          else if(!strcmp(t, "dump.attr")) opt.show.dumpattr = u;
+          else if(!strcmp(t, "dump.regs")) opt.show.dumpregs = u;
           else err = 5;
         }
         break;
@@ -178,10 +186,11 @@ void help()
 {
   fprintf(stderr,
     "Get Monitor Data\nusage: gmd options\n"
-    "  --show list\n"
+    "  --show LIST\n"
     "      things to log\n"
-    "      'list' is a comma-separated list of 'code', 'regs', 'data', 'io', 'intr', 'acc'\n"
-    "  --no-show list\n"
+    "      LIST is a comma-separated list of code, regs, data, io, intr, acc,\n"
+    "      dump, dump.mem, dump.attr, dump.regs\n"
+    "  --no-show LIST\n"
     "      things not to log (see --show)\n"
     "  --raw\n"
     "      print DDC data in binary form to stderr\n"
@@ -262,7 +271,7 @@ int check_ip()
       u1 == 0xfe ||
       (u1 == 0xfd && u >= 1 && (u_m1 == 0xfb || u_m1 == 0xfa))
     ) {
-      x86emu_log("* loop detected\n");
+      x86emu_log(&x86emu, "* loop detected\n");
       abort = 1;
     }
   }
@@ -271,7 +280,7 @@ int check_ip()
     u1 = vm_read_byte_noerr(mem, u + 1);
     u2 = vm_read_byte_noerr(mem, u + 2);
     if(u1 == 0xfd && u2 == 0xff) {
-      x86emu_log("* loop detected\n");
+      x86emu_log(&x86emu, "* loop detected\n");
       abort = 1;
     }
   }
@@ -295,7 +304,7 @@ int do_int(u8 num, unsigned type)
 
   if(vm->bios.iv_funcs[num]) return 0;
 
-  x86emu_log("# unhandled interrupt 0x%02x\n", num);
+  x86emu_log(&x86emu, "* unhandled interrupt 0x%02x\n", num);
 
   return 1;
 }
@@ -349,8 +358,17 @@ int vm_run(vm_t *vm)
 
   iopl(0);
 
+  if(opt.show.dump || opt.show.dumpmem || opt.show.dumpattr || opt.show.dumpregs) {
+    i = 0;
+    if(opt.show.dump) i |= -1;
+    if(opt.show.dumpmem) i |= X86EMU_DUMP_MEM;
+    if(opt.show.dumpattr) i |= X86EMU_DUMP_MEM | X86EMU_DUMP_ATTR;
+    if(opt.show.dumpregs) i |= X86EMU_DUMP_REGS;
+    x86emu_log(vm->emu, "\n- - vm dump - -\n");
+    x86emu_dump(vm->emu, i);
+  }
+
   x86emu_clear_log(vm->emu, 1);
-  x86emu_clear_log(vm->emu, 0);
 
   if(vm->emu->mem->invalid_write) ok = 0;
 
