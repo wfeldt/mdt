@@ -18,20 +18,16 @@
 #include <linux/fs.h>	/* BLKGETSIZE64 */
 #include <x86emu.h>
 
+#define STR_SIZE 128
+
+#define ADD_RES(w, h, f, i) \
+  res[res_cnt].width = w, \
+  res[res_cnt].height = h, \
+  res[res_cnt].vfreq = f, \
+  res[res_cnt++].il = i;
+
 typedef struct {
   x86emu_t *emu;
-
-  unsigned kbd_cnt;
-  unsigned key;
-
-  unsigned memsize;	// in MB
-
-  unsigned a20:1;
-
-  struct {
-    int (* iv_funcs[0x100])(void);
-  } bios;
-
 } vm_t;
 
 
@@ -48,11 +44,15 @@ void deb_outl(u16 addr, u32 val);
 int check_ip(void);
 vm_t *vm_new(void);
 void vm_free(vm_t *vm);
-int vm_run(vm_t *vm);
+void vm_run(vm_t *vm);
 int do_int(u8 num, unsigned type);
 void prepare_bios(vm_t *vm);
 int map_memory(x86emu_mem_t *mem, off_t start, unsigned size);
 
+void print_edid(int port, unsigned char *edid);
+char *eisa_vendor(unsigned v);
+char *canon_str(unsigned char *s, int len);
+int chk_edid_info(unsigned char *edid);
 
 struct option options[] = {
   { "help",       0, NULL, 'h'  },
@@ -184,8 +184,10 @@ void flush_log(char *buf, unsigned size)
 
 void help()
 {
-  fprintf(stderr,
+  printf(
     "Get Monitor Data\nusage: gmd options\n"
+    "  --port PORT_NUMBER\n"
+    "      display port number to use. Default: 0, typically 0 - 3.\n"
     "  --show LIST\n"
     "      things to log\n"
     "      LIST is a comma-separated list of code, regs, data, io, intr, acc,\n"
@@ -193,7 +195,11 @@ void help()
     "  --no-show LIST\n"
     "      things not to log (see --show)\n"
     "  --raw\n"
-    "      print DDC data in binary form to stderr\n"
+    "      print DDC data in binary form to STDERR\n"
+    "  --bios BIOS_IMAGE\n"
+    "      use alternative Video BIOS (Don't try this at home!)\n"
+    "  --bios-entry START_ADDRESS\n"
+    "      specify start address for Video BIOS\n"
     "  --verbose\n"
     "      log more (can be given more than once for even more logs)\n"
     "  --help\n"
@@ -291,22 +297,9 @@ int check_ip()
 
 int do_int(u8 num, unsigned type)
 {
-  vm_t *vm = x86emu.private;
+  if((type & 0xff) == INTR_TYPE_FAULT) x86emu_stop();
 
-  if((type & 0xff) == INTR_TYPE_FAULT) {
-    x86emu_stop();
-
-    return 0;
-  }
-
-  // no special handling
   return 0;
-
-  if(vm->bios.iv_funcs[num]) return 0;
-
-  x86emu_log(&x86emu, "* unhandled interrupt 0x%02x\n", num);
-
-  return 1;
 }
 
 
@@ -317,7 +310,7 @@ vm_t *vm_new()
 
   vm = calloc(1, sizeof *vm);
 
-  vm->emu = x86emu_new();
+  vm->emu = x86emu_new(X86EMU_PERM_R | X86EMU_PERM_W | X86EMU_PERM_X, X86EMU_PERM_R | X86EMU_PERM_W);
   vm->emu->private = vm;
 
   x86emu_set_log(vm->emu, 200000000, flush_log);
@@ -336,9 +329,10 @@ void vm_free(vm_t *vm)
 }
 
 
-int vm_run(vm_t *vm)
+void vm_run(vm_t *vm)
 {
-  int ok = 1, i;
+  int i;
+  unsigned char edid[0x80];
 
   if(opt.show.regs) vm->emu->log.regs = 1;
   if(opt.show.code) vm->emu->log.code = 1;
@@ -350,12 +344,10 @@ int vm_run(vm_t *vm)
   vm->emu->x86.tsc = 0;
   vm->emu->x86.tsc_max = -1;
 
-  if(vm_read_word(vm->emu->mem, 0x7c00) == 0) return ok;
+  if(vm_read_word(vm->emu->mem, 0x7c00) == 0) return;
 
   iopl(3);
-
   x86emu_exec(vm->emu);
-
   iopl(0);
 
   if(opt.show.dump || opt.show.dumpmem || opt.show.dumpattr || opt.show.dumpregs) {
@@ -370,21 +362,23 @@ int vm_run(vm_t *vm)
 
   x86emu_clear_log(vm->emu, 1);
 
-  if(vm->emu->mem->invalid_write) ok = 0;
-
   printf("port = %u, eax = %08x\n", opt.port, vm->emu->x86.R_EAX);
 
+  for(i = 0; i < 0x80; i++) edid[i] = vm_read_byte(vm->emu->mem, 0x8000 + i);
+
   if(opt.raw) {
-    for(i = 0; i < 0x80; i++) fputc(vm_read_byte(vm->emu->mem, 0x8000 + i), stderr);
+    for(i = 0; i < 0x80; i++) fputc(edid[i], stderr);
   }
   else {
+    printf("- ddc data, port %d -\n", opt.port);
     for(i = 0; i < 0x80; i++) {
-      fprintf(stderr, "%02x", vm_read_byte(vm->emu->mem, 0x8000 + i));
-      fprintf(stderr, (i & 15) == 15 ? "\n" : " ");
+      printf("%02x", edid[i]);
+      printf((i & 15) == 15 ? "\n" : " ");
     }
+    printf("- -\n");
   }
 
-  return ok;
+  print_edid(opt.port, edid);
 }
 
 
@@ -393,9 +387,7 @@ void prepare_bios(vm_t *vm)
   unsigned u;
   x86emu_mem_t *mem = vm->emu->mem;
 
-  vm->memsize = 1024;	// 1GB RAM
-
-  // map_memory(vm, 0, 0x1000);
+  map_memory(mem, 0, 0x1000);
 
   if(opt.bios) {
     unsigned char buf[0x10000];
@@ -509,6 +501,324 @@ int map_memory(x86emu_mem_t *mem, off_t start, unsigned size)
   munmap(p, map_size);
 
   close(fd);
+
+  return 1;
+}
+
+
+void print_edid(int port, unsigned char *edid)
+{
+  int i;
+  unsigned u, u1, u2, tag, mi_cnt = 0, res_cnt = 0;
+  unsigned hblank, hsync_ofs, hsync, vblank, vsync_ofs, vsync;
+  char *s;
+  struct {
+    unsigned lcd:1;
+    unsigned vendor_id, product_id;
+    unsigned width_mm, height_mm;
+    unsigned year;
+    unsigned min_vsync, max_vsync, min_hsync, max_hsync;
+    unsigned hblank, hsync_ofs, hsync, vblank, vsync_ofs, vsync;
+    char vendor_name[STR_SIZE], product_name[STR_SIZE], serial[STR_SIZE];
+  } m = { };
+  struct {
+    unsigned width, height, width_mm, height_mm, clock;
+    unsigned hdisp, hsyncstart, hsyncend, htotal, hflag;
+    unsigned vdisp, vsyncstart, vsyncend, vtotal, vflag;
+  } mi_list[4] = { }, *mi;
+  struct {
+    unsigned width, height, vfreq, il;
+  } res[24] = { };
+
+
+  if(!chk_edid_info(edid)) {
+    printf("Port %u: no monitor info\n", port);
+    return;
+  }
+
+  if(edid[0x14] & 0x80) m.lcd = 1;
+
+  m.vendor_id = (edid[8] << 8) + edid[9];
+  m.product_id = (edid[0xb] << 8) + edid[0xa];
+
+  if(edid[0x15] > 0 && edid[0x16] > 0) {
+    m.width_mm = edid[0x15] * 10;
+    m.height_mm = edid[0x16] * 10;
+  }
+
+  m.year = 1990 + edid[0x11];
+
+  u = edid[0x23];
+  if(u & (1 << 7)) ADD_RES(720, 400, 70, 0);
+  if(u & (1 << 6)) ADD_RES(720, 400, 88, 0);
+  if(u & (1 << 5)) ADD_RES(640, 480, 60, 0);
+  if(u & (1 << 4)) ADD_RES(640, 480, 67, 0);
+  if(u & (1 << 3)) ADD_RES(640, 480, 72, 0);
+  if(u & (1 << 2)) ADD_RES(640, 480, 75, 0);
+  if(u & (1 << 1)) ADD_RES(800, 600, 56, 0);
+  if(u & (1 << 0)) ADD_RES(800, 600, 60, 0);
+
+  u = edid[0x24];
+  if(u & (1 << 7)) ADD_RES( 800,  600, 72, 0);
+  if(u & (1 << 6)) ADD_RES( 800,  600, 75, 0);
+  if(u & (1 << 5)) ADD_RES( 832,  624, 75, 0);
+  if(u & (1 << 4)) ADD_RES(1024,  768, 87, 1);
+  if(u & (1 << 3)) ADD_RES(1024,  768, 60, 0);
+  if(u & (1 << 2)) ADD_RES(1024,  768, 70, 0);
+  if(u & (1 << 1)) ADD_RES(1024,  768, 75, 0);
+  if(u & (1 << 0)) ADD_RES(1280, 1024, 75, 0);
+
+  for(i = 0; i < 4; i++) {
+    u1 = (edid[0x26 + 2 * i] + 31) * 8;
+    u2 = edid[0x27 + 2 * i];
+    u = 0;
+    switch((u2 >> 6) & 3) {
+      case 1: u = (u1 * 3) / 4; break;
+      case 2: u = (u1 * 4) / 5; break;
+      case 3: u = (u1 * 9) / 16; break;
+    }
+    if(u) {
+      ADD_RES(u1, u, (u2 & 0x3f) + 60, 0);
+    }
+  }
+
+  // detailed timings
+
+  /* max. 4 mi_list[] entries */
+  for(i = 0x36; i < 0x36 + 4 * 0x12; i += 0x12) {
+    tag = (edid[i] << 24) + (edid[i + 1] << 16) + (edid[i + 2] << 8) + edid[i + 3];
+
+    switch(tag) {
+      case 0xfc:
+        if(edid[i + 5]) {
+          /* name entry is splitted some times */
+          // str_printf(&name, -1, "%s%s", name ? " " : "", canon_str(edid + i + 5, 0xd));
+          memcpy(m.product_name, canon_str(edid + i + 5, 0xd), sizeof m.product_name);
+        }
+        break;
+
+      case 0xfd:
+        u = 0;
+        u1 = edid[i + 5];
+        u2 = edid[i + 6];
+        if(u1 > u2 || !u1) u = 1;
+        m.min_vsync = u1;
+        m.max_vsync = u2;
+        u1 = edid[i + 7];
+        u2 = edid[i + 8];
+        if(u1 > u2 || !u1) u = 1;
+        m.min_hsync = u1;
+        m.max_hsync = u2;
+        if(u) {
+          m.min_vsync = m.max_vsync = m.min_hsync = m.max_hsync = 0;
+        }
+        break;
+
+      case 0xfe:
+        if(!*m.vendor_name && edid[i + 5]) {
+          memcpy(m.vendor_name, canon_str(edid + i + 5, 0xd), sizeof m.vendor_name);
+          for(s = m.vendor_name; *s; s++) if(*s < ' ') *s = ' ';
+        }
+        break;
+
+      case 0xff:
+        if(!*m.serial && edid[i + 5]) {
+          memcpy(m.serial, canon_str(edid + i + 5, 0xd), sizeof m.serial);
+          for(s = m.serial; *s; s++) if(*s < ' ') *s = ' ';
+        }
+        break;
+
+      default:
+        if(tag < 0x100) {
+        }
+        else {
+          mi = mi_list + mi_cnt++;
+
+          mi->width_mm = m.width_mm;
+          mi->height_mm = m.height_mm;
+
+          u = (edid[i + 0] + (edid[i + 1] << 8)) * 10;	/* pixel clock in kHz */
+          if(!u) break;
+          mi->clock = u;
+
+          u1 = edid[i + 2] + ((edid[i + 4] & 0xf0) << 4);
+          u2 = edid[i + 5] + ((edid[i + 7] & 0xf0) << 4);
+          if(!u1 || !u2 || u1 == 0xfff || u2 == 0xfff) break;
+          mi->width = u1;
+          mi->height = u2;
+
+          u1 = edid[i + 12] + ((edid[i + 14] & 0xf0) << 4);
+          u2 = edid[i + 13] + ((edid[i + 14] & 0xf) << 8);
+          if(!u1 || !u2 || u1 == 0xfff || u2 == 0xfff) break;
+          mi->width_mm = u1;
+          mi->height_mm = u2;
+
+          hblank = edid[i + 3] + ((edid[i + 4] & 0xf) << 8);
+          hsync_ofs = edid[i + 8] + ((edid[i + 11] & 0xc0) << 2);
+          hsync = edid[i + 9] + ((edid[i + 11] & 0x30) << 4);
+
+          vblank = edid[i + 6] + ((edid[i + 7] & 0xf) << 8);
+          vsync_ofs = ((edid[i + 10] & 0xf0) >> 4) + ((edid[i + 11] & 0x0c) << 2);
+          vsync = (edid[i + 10] & 0xf) + ((edid[i + 11] & 0x03) << 4);
+
+          mi->hdisp       = mi->width;
+          mi->hsyncstart  = mi->width + hsync_ofs;
+          mi->hsyncend    = mi->width + hsync_ofs + hsync;
+          mi->htotal      = mi->width + hblank;
+
+          mi->vdisp       = mi->height;
+          mi->vsyncstart  = mi->height + vsync_ofs;
+          mi->vsyncend    = mi->height + vsync_ofs + vsync;
+          mi->vtotal      = mi->height + vblank;
+
+          u = edid[i + 17];
+
+          if(((u >> 3) & 3) == 3) {
+            mi->hflag = (u & 4) ? '+' : '-';
+            mi->vflag = (u & 2) ? '+' : '-';
+          }
+        }
+    }
+  }
+
+  for(i = 0; i < mi_cnt; i++) {
+    mi = mi_list + i;
+
+    if(mi->width && mi->height) {
+      ADD_RES(mi->width, mi->height, 60, 0);
+
+      if(mi->width_mm && mi->height_mm) {
+        u = (mi->width_mm * mi->height * 16) / (mi->height_mm * mi->width);
+        u1 = m.width_mm ? (m.width_mm * 16) / mi->width_mm : 16;
+        u2 = m.height_mm ? (m.height_mm * 16) / mi->height_mm : 16;
+        if(
+          u <= 8 || u >= 32 ||		/* allow 1:2 distortion */
+          u1 <= 8 || u1 >= 32 ||	/* width cm & mm values disagree by factor >2 --> use cm values */
+          u2 <= 8 || u2 >= 32 ||	/* dto, height */
+          mi->width_mm < 100 ||		/* too small to be true... */
+          mi->height_mm < 100
+        ) {
+          /* ok, try cm values */
+          if(m.width_mm && m.height_mm) {
+            u = (m.width_mm * mi->height * 16) / (m.height_mm * mi->width);
+            if(u > 8 && u < 32 && m.width_mm >= 100 && m.height_mm >= 100) {
+              mi->width_mm = m.width_mm;
+              mi->height_mm = m.height_mm;
+            }
+          }
+          /* could not fix, clear */
+          if(u <= 8 || u >= 32 || mi->width_mm < 100 || mi->height_mm < 100) {
+            mi->width_mm = mi->height_mm = 0;
+          }
+        }
+      }
+    }
+  }
+
+  printf("Model: %s %04x", eisa_vendor(m.vendor_id), m.product_id);
+  if(*m.vendor_name || *m.product_name) {
+    printf(" (%s%s%s)", m.vendor_name, *m.vendor_name ? " " : "", m.product_name);
+  }
+  if(m.lcd) printf(" [LCD]");
+
+  printf("\nManuf. Year: %u\n", m.year);
+
+  if(mi_cnt) {
+    u1 = mi_list[0].width_mm;
+    u2 = mi_list[0].height_mm;
+  }
+  else {
+    u1 = m.width_mm;
+    u2 = m.height_mm;
+  }
+
+  printf("Size: %ux%u mm\n", u1, u2);
+
+  printf("VSync: %u-%u Hz, HSync: %u-%u kHz\n", m.min_vsync, m.max_vsync, m.min_hsync, m.max_hsync);
+
+  printf("Resolutions:\n");
+  for(i = 0; i < res_cnt; i++) {
+    printf("%s", i % 4 == 0 ? "  " : ", ");
+    printf("%ux%u@%uHz%s",
+      res[i].width, res[i].height, res[i].vfreq,
+      res[i].il ? " (interlaced)" : ""
+    );
+    printf("%s", i % 4 == 3 ? "\n" : "");
+  }
+  printf("%s", i % 4 ? "\n" : "");
+
+  for(i = 0; i < mi_cnt; i++)  {
+    mi = mi_list + i;
+    if(mi->htotal && mi->vtotal) {
+      printf("Detailed Timings #%d:\n", i);
+      printf("   Resolution: %ux%u\n", mi->width, mi->height);
+      printf(
+        "   Horizontal: %4u %4u %4u %4u (+%u +%u +%u) %chsync\n",
+        mi->hdisp, mi->hsyncstart, mi->hsyncend, mi->htotal,
+        mi->hsyncstart - mi->hdisp, mi->hsyncend - mi->hdisp, mi->htotal - mi->hdisp,
+        mi->hflag
+      );
+      printf(
+        "     Vertical: %4u %4u %4u %4u (+%u +%u +%u) %cvsync\n",
+        mi->vdisp, mi->vsyncstart, mi->vsyncend, mi->vtotal,
+        mi->vsyncstart - mi->vdisp, mi->vsyncend - mi->vdisp, mi->vtotal - mi->vdisp,
+        mi->vflag
+      );
+
+      printf(
+        "  Frequencies: %u.%02u MHz, %u.%02u kHz, %u.%02u Hz\n",
+        mi->clock / 1000, (mi->clock * 100 / 1000) % 100,
+        mi->clock / mi->htotal, (mi->clock * 100 / mi->htotal) % 100,
+        mi->clock * 1000 / mi->htotal / mi->vtotal, 0
+      );
+    }
+  }
+}
+
+
+char *eisa_vendor(unsigned v)
+{
+  static char s[4];
+
+  s[0] = ((v >> 10) & 0x1f) + 'A' - 1;
+  s[1] = ((v >>  5) & 0x1f) + 'A' - 1;
+  s[2] = ( v        & 0x1f) + 'A' - 1;
+  s[3] = 0;
+
+  return s;
+}
+
+
+char *canon_str(unsigned char *s, int len)
+{
+  static char m0[STR_SIZE];
+  char *m1;
+  int i;
+
+  if(len < 0) len = 0;          /* just to be safe */
+  if(len > sizeof m0 - 1) len = sizeof m0 - 1;
+
+  for(m1 = m0, i = 0; i < len; i++) {
+    if(m1 == m0 && s[i] <= ' ') continue;
+    *m1++ = s[i];
+  }
+  *m1 = 0;
+  while(m1 > m0 && m1[-1] <= ' ') {
+    *--m1 = 0;
+  }
+
+  return m0;
+}
+
+
+/* do some checks to ensure we got a reasonable block */
+int chk_edid_info(unsigned char *edid)
+{
+  // no vendor or model info
+  if(!(edid[0x08] || edid[0x09] || edid[0x0a] || edid[0x0b])) return 0;
+
+  // no edid version or revision
+  if(!(edid[0x12] || edid[0x13])) return 0;
 
   return 1;
 }
