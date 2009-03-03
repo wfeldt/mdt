@@ -35,17 +35,10 @@ void lprintf(const char *format, ...) __attribute__ ((format (printf, 1, 2)));
 void flush_log(char *buf, unsigned size);
 
 void help(void);
-u8 deb_inb(u16 addr);
-u16 deb_inw(u16 addr);
-u32 deb_inl(u16 addr);
-void deb_outb(u16 addr, u8 val);
-void deb_outw(u16 addr, u16 val);
-void deb_outl(u16 addr, u32 val);
-int check_ip(void);
 vm_t *vm_new(void);
 void vm_free(vm_t *vm);
 void vm_run(vm_t *vm);
-int do_int(u8 num, unsigned type);
+int do_int(x86emu_t *emu, u8 num, unsigned type);
 void prepare_bios(vm_t *vm);
 int map_memory(x86emu_mem_t *mem, off_t start, unsigned size);
 
@@ -208,96 +201,9 @@ void help()
 }
 
 
-u8 deb_inb(u16 addr)
+int do_int(x86emu_t *emu, u8 num, unsigned type)
 {
-  u8 u;
-
-  u = inb(addr);
-//  x86emu_log("# i [%04x] = %02x\n", addr, u);
-
-  return u;
-}
-
-
-u16 deb_inw(u16 addr)
-{
-  u16 u;
-
-  u = inw(addr);
-//  x86emu_log("# i [%04x] = %04x\n", addr, u);
-
-  return u;
-}
-
-
-u32 deb_inl(u16 addr)
-{
-  u32 u;
-
-  u = inl(addr);
-//  x86emu_log("# i [%04x] = %08x\n", addr, u);
-
-  return u;
-}
-
-
-void deb_outb(u16 addr, u8 val)
-{
-//  x86emu_log("# o [%04x] = %02x\n", addr, val);
-  outb(val, addr);
-}
-
-
-void deb_outw(u16 addr, u16 val)
-{
-//  x86emu_log("# o [%04x] = %04x\n", addr, val);
-  outw(val, addr);
-}
-
-
-void deb_outl(u16 addr, u32 val)
-{
-//  x86emu_log("# o [%04x] = %08x\n", addr, val);
-  outl(val, addr);
-}
-
-
-int check_ip()
-{
-  x86emu_mem_t *mem = x86emu.mem;
-  unsigned u, u1, u_m1, u2;
-  int abort = 0;
-
-  u = x86emu.x86.R_CS_BASE + x86emu.x86.R_EIP;
-
-  if(vm_read_byte_noerr(mem, u) == 0xeb) {
-    u1 = vm_read_byte_noerr(mem, u + 1);
-    u_m1 = vm_read_byte_noerr(mem, u - 1);
-    if(
-      u1 == 0xfe ||
-      (u1 == 0xfd && u >= 1 && (u_m1 == 0xfb || u_m1 == 0xfa))
-    ) {
-      x86emu_log(&x86emu, "* loop detected\n");
-      abort = 1;
-    }
-  }
-
-  if(vm_read_byte_noerr(mem, u) == 0xe9) {
-    u1 = vm_read_byte_noerr(mem, u + 1);
-    u2 = vm_read_byte_noerr(mem, u + 2);
-    if(u1 == 0xfd && u2 == 0xff) {
-      x86emu_log(&x86emu, "* loop detected\n");
-      abort = 1;
-    }
-  }
-
-  return abort;
-}
-
-
-int do_int(u8 num, unsigned type)
-{
-  if((type & 0xff) == INTR_TYPE_FAULT) x86emu_stop();
+  if((type & 0xff) == INTR_TYPE_FAULT) x86emu_stop(emu);
 
   return 0;
 }
@@ -316,8 +222,6 @@ vm_t *vm_new()
   x86emu_set_log(vm->emu, 200000000, flush_log);
 
   for(u = 0; u < 0x100; u++) x86emu_set_intr_func(vm->emu, u, do_int);
-
-  x86emu_set_code_check(vm->emu, check_ip);
 
   return vm;
 }
@@ -341,13 +245,10 @@ void vm_run(vm_t *vm)
   if(opt.show.io) vm->emu->log.io = 1;
   if(opt.show.intr) vm->emu->log.intr = 1;
 
-  vm->emu->x86.tsc = 0;
-  vm->emu->x86.tsc_max = -1;
-
   if(vm_read_word(vm->emu->mem, 0x7c00) == 0) return;
 
   iopl(3);
-  x86emu_exec(vm->emu);
+  x86emu_run(vm->emu, X86EMU_RUN_LOOP | X86EMU_RUN_NO_CODE);
   iopl(0);
 
   if(opt.show.dump || opt.show.dumpmem || opt.show.dumpattr || opt.show.dumpregs) {
