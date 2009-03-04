@@ -49,7 +49,6 @@ int chk_edid_info(unsigned char *edid);
 
 struct option options[] = {
   { "help",       0, NULL, 'h'  },
-  { "verbose",    0, NULL, 'v'  },
   { "show",       1, NULL, 1005 },
   { "no-show",    1, NULL, 1006 },
   { "port",       1, NULL, 1007 },
@@ -60,7 +59,6 @@ struct option options[] = {
 };
 
 struct {
-  unsigned verbose;
   unsigned port;
 
   struct {
@@ -68,13 +66,15 @@ struct {
     unsigned regs:1;
     unsigned data:1;
     unsigned io:1;
-    unsigned intr:1;
+    unsigned ints:1;
     unsigned acc:1;
     unsigned rawptable:1;
     unsigned dump:1;
     unsigned dumpmem:1;
     unsigned dumpattr:1;
     unsigned dumpregs:1;
+    unsigned dumpints:1;
+    unsigned dumpio:1;
   } show;
 
   unsigned raw:1;
@@ -100,10 +100,6 @@ int main(int argc, char **argv)
     err = 0;
 
     switch(i) {
-      case 'v':
-        opt.verbose++;
-        break;
-
       case 1005:
       case 1006:
         s = optarg;
@@ -113,12 +109,14 @@ int main(int argc, char **argv)
           else if(!strcmp(t, "regs")) opt.show.regs = u;
           else if(!strcmp(t, "data")) opt.show.data = u;
           else if(!strcmp(t, "io")) opt.show.io = u;
-          else if(!strcmp(t, "intr")) opt.show.intr = u;
+          else if(!strcmp(t, "ints")) opt.show.ints = u;
           else if(!strcmp(t, "acc")) opt.show.acc = u;
           else if(!strcmp(t, "dump")) opt.show.dump = u;
           else if(!strcmp(t, "dump.mem")) opt.show.dumpmem = u;
           else if(!strcmp(t, "dump.attr")) opt.show.dumpattr = u;
           else if(!strcmp(t, "dump.regs")) opt.show.dumpregs = u;
+          else if(!strcmp(t, "dump.ints")) opt.show.dumpints = u;
+          else if(!strcmp(t, "dump.io")) opt.show.dumpio = u;
           else err = 5;
         }
         break;
@@ -183,8 +181,8 @@ void help()
     "      display port number to use. Default: 0, typically 0 - 3.\n"
     "  --show LIST\n"
     "      things to log\n"
-    "      LIST is a comma-separated list of code, regs, data, io, intr, acc,\n"
-    "      dump, dump.mem, dump.attr, dump.regs\n"
+    "      LIST is a comma-separated list of code, regs, data, io, ints, acc,\n"
+    "      dump, dump.mem, dump.attr, dump.regs, dump.io, dump.ints\n"
     "  --no-show LIST\n"
     "      things not to log (see --show)\n"
     "  --raw\n"
@@ -193,8 +191,6 @@ void help()
     "      use alternative Video BIOS (Don't try this at home!)\n"
     "  --bios-entry START_ADDRESS\n"
     "      specify start address for Video BIOS\n"
-    "  --verbose\n"
-    "      log more (can be given more than once for even more logs)\n"
     "  --help\n"
     "      show this text\n"
   );
@@ -243,7 +239,7 @@ void vm_run(vm_t *vm)
   if(opt.show.data) vm->emu->log.data = 1;
   if(opt.show.acc) vm->emu->log.acc = 1;
   if(opt.show.io) vm->emu->log.io = 1;
-  if(opt.show.intr) vm->emu->log.intr = 1;
+  if(opt.show.ints) vm->emu->log.ints = 1;
 
   if(vm_read_word(vm->emu->mem, 0x7c00) == 0) return;
 
@@ -251,12 +247,15 @@ void vm_run(vm_t *vm)
   x86emu_run(vm->emu, X86EMU_RUN_LOOP | X86EMU_RUN_NO_CODE);
   iopl(0);
 
-  if(opt.show.dump || opt.show.dumpmem || opt.show.dumpattr || opt.show.dumpregs) {
-    i = 0;
-    if(opt.show.dump) i |= -1;
-    if(opt.show.dumpmem) i |= X86EMU_DUMP_MEM;
-    if(opt.show.dumpattr) i |= X86EMU_DUMP_MEM | X86EMU_DUMP_ATTR;
-    if(opt.show.dumpregs) i |= X86EMU_DUMP_REGS;
+  i = 0;
+  if(opt.show.dump) i |= -1;
+  if(opt.show.dumpmem) i |= X86EMU_DUMP_MEM;
+  if(opt.show.dumpattr) i |= X86EMU_DUMP_MEM | X86EMU_DUMP_ATTR;
+  if(opt.show.dumpregs) i |= X86EMU_DUMP_REGS;
+  if(opt.show.dumpints) i |= X86EMU_DUMP_INTS;
+  if(opt.show.dumpio) i |= X86EMU_DUMP_IO;
+
+  if(i) {
     x86emu_log(vm->emu, "\n- - vm dump - -\n");
     x86emu_dump(vm->emu, i);
   }
