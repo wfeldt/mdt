@@ -264,7 +264,7 @@ void vm_run(vm_t *vm)
   if(i) {
     x86emu_log(vm->emu, "\n; - - - emulator state\n");
     x86emu_dump(vm->emu, i);
-    x86emu_log(vm->emu, "; - - -\n\n");
+    x86emu_log(vm->emu, "; - - -\n");
   }
 
   x86emu_clear_log(vm->emu, 1);
