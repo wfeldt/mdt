@@ -40,7 +40,7 @@ void vm_free(vm_t *vm);
 void vm_run(vm_t *vm);
 int do_int(x86emu_t *emu, u8 num, unsigned type);
 void prepare_bios(vm_t *vm);
-int map_memory(x86emu_mem_t *mem, off_t start, unsigned size);
+int map_memory(vm_t *vm, off_t start, unsigned size);
 
 void print_edid(int port, unsigned char *edid);
 char *eisa_vendor(unsigned v);
@@ -75,6 +75,8 @@ struct {
     unsigned dumpregs:1;
     unsigned dumpints:1;
     unsigned dumpio:1;
+    unsigned dumptime:1;
+    unsigned tsc:1;
   } show;
 
   unsigned raw:1;
@@ -117,6 +119,8 @@ int main(int argc, char **argv)
           else if(!strcmp(t, "dump.regs")) opt.show.dumpregs = u;
           else if(!strcmp(t, "dump.ints")) opt.show.dumpints = u;
           else if(!strcmp(t, "dump.io")) opt.show.dumpio = u;
+          else if(!strcmp(t, "dump.time")) opt.show.dumptime = u;
+          else if(!strcmp(t, "tsc")) opt.show.tsc = u;
           else err = 5;
         }
         break;
@@ -181,8 +185,8 @@ void help()
     "      display port number to use. Default: 0, typically 0 - 3.\n"
     "  --show LIST\n"
     "      things to log\n"
-    "      LIST is a comma-separated list of code, regs, data, io, ints, acc,\n"
-    "      dump, dump.mem, dump.attr, dump.regs, dump.io, dump.ints\n"
+    "      LIST is a comma-separated list of code, regs, data, io, ints, acc, tsc,\n"
+    "      dump, dump.mem, dump.attr, dump.regs, dump.io, dump.ints, dump.time\n"
     "  --no-show LIST\n"
     "      things not to log (see --show)\n"
     "  --raw\n"
@@ -240,8 +244,9 @@ void vm_run(vm_t *vm)
   if(opt.show.acc) vm->emu->log.acc = 1;
   if(opt.show.io) vm->emu->log.io = 1;
   if(opt.show.ints) vm->emu->log.ints = 1;
+  if(opt.show.tsc) vm->emu->log.tsc = 1;
 
-  if(vm_read_word(vm->emu->mem, 0x7c00) == 0) return;
+  if(x86emu_read_word(vm->emu, 0x7c00) == 0) return;
 
   iopl(3);
   x86emu_run(vm->emu, X86EMU_RUN_LOOP | X86EMU_RUN_NO_CODE);
@@ -254,17 +259,19 @@ void vm_run(vm_t *vm)
   if(opt.show.dumpregs) i |= X86EMU_DUMP_REGS;
   if(opt.show.dumpints) i |= X86EMU_DUMP_INTS;
   if(opt.show.dumpio) i |= X86EMU_DUMP_IO;
+  if(opt.show.dumptime) i |= X86EMU_DUMP_TIME;
 
   if(i) {
-    x86emu_log(vm->emu, "\n- - vm dump - -\n");
+    x86emu_log(vm->emu, "\n; - - - emulator state\n");
     x86emu_dump(vm->emu, i);
+    x86emu_log(vm->emu, "; - - -\n\n");
   }
 
   x86emu_clear_log(vm->emu, 1);
 
   printf("port = %u, eax = %08x\n", opt.port, vm->emu->x86.R_EAX);
 
-  for(i = 0; i < 0x80; i++) edid[i] = vm_read_byte(vm->emu->mem, 0x8000 + i);
+  for(i = 0; i < 0x80; i++) edid[i] = x86emu_read_byte(vm->emu, 0x8000 + i);
 
   if(opt.raw) {
     for(i = 0; i < 0x80; i++) fputc(edid[i], stderr);
@@ -278,16 +285,20 @@ void vm_run(vm_t *vm)
     printf("- -\n");
   }
 
-  print_edid(opt.port, edid);
+  if(vm->emu->x86.R_EAX == 0x4f) {
+    print_edid(opt.port, edid);
+  }
+  else {
+    printf("Port %u: no monitor info\n", opt.port);
+  }
 }
 
 
 void prepare_bios(vm_t *vm)
 {
   unsigned u;
-  x86emu_mem_t *mem = vm->emu->mem;
 
-  map_memory(mem, 0, 0x1000);
+  map_memory(vm, 0, 0x1000);
 
   if(opt.bios) {
     unsigned char buf[0x10000];
@@ -307,33 +318,33 @@ void prepare_bios(vm_t *vm)
       else {
         lprintf("video bios: read %d bytes from %s\n", i, opt.bios);
         for(j = 0; j < i; j++) {
-          vm_write_byte(mem, 0xc0000 + j, buf[j]);
+          x86emu_write_byte(vm->emu, 0xc0000 + j, buf[j]);
         }
         lprintf("video bios: bios entry: 0xc000:0x%04x\n", opt.bios_entry);
-        vm_write_word(mem, 0x10*4, opt.bios_entry);
-        vm_write_word(mem, 0x10*4+2, 0xc000);
+        x86emu_write_word(vm->emu, 0x10*4, opt.bios_entry);
+        x86emu_write_word(vm->emu, 0x10*4+2, 0xc000);
       }
     }
   }
   else {
-    map_memory(mem, 0xc0000, 0x1000);
-    if(vm_read_word(mem, 0xc0000) != 0xaa55) {
+    map_memory(vm, 0xc0000, 0x1000);
+    if(x86emu_read_word(vm->emu, 0xc0000) != 0xaa55) {
       lprintf("no video bios\n");
       return;
     }
 
-    u = vm_read_byte(mem, 0xc0002) * 0x200;
+    u = x86emu_read_byte(vm->emu, 0xc0002) * 0x200;
     lprintf("video bios size: 0x%04x\n", u);
-    map_memory(mem, 0xc0000, u);
+    map_memory(vm, 0xc0000, u);
   }
 
   // jmp far 0:0x7c00
-  vm_write_byte(mem, 0xffff0, 0xea);
-  vm_write_word(mem, 0xffff1, 0x7c00);
-  vm_write_word(mem, 0xffff3, 0x0000);
+  x86emu_write_byte(vm->emu, 0xffff0, 0xea);
+  x86emu_write_word(vm->emu, 0xffff1, 0x7c00);
+  x86emu_write_word(vm->emu, 0xffff3, 0x0000);
 
-  vm_write_word(mem, 0x7c00, 0x10cd);
-  vm_write_byte(mem, 0x7c02, 0xf4);
+  x86emu_write_word(vm->emu, 0x7c00, 0x10cd);
+  x86emu_write_byte(vm->emu, 0x7c02, 0xf4);
 
   vm->emu->x86.R_EAX = 0x4f15;
   vm->emu->x86.R_EBX = 1;
@@ -343,7 +354,7 @@ void prepare_bios(vm_t *vm)
 }
 
 
-int map_memory(x86emu_mem_t *mem, off_t start, unsigned size)
+int map_memory(vm_t *vm, off_t start, unsigned size)
 {
   off_t map_start, xofs;
   int psize = getpagesize(), fd;
@@ -395,7 +406,7 @@ int map_memory(x86emu_mem_t *mem, off_t start, unsigned size)
   );
 
   for(u = 0; u < size; u++) {
-    vm_write_byte(mem, start + u, *(unsigned char *) (p + xofs + u));
+    x86emu_write_byte(vm->emu, start + u, *(unsigned char *) (p + xofs + u));
   }
 
   munmap(p, map_size);
