@@ -1,5 +1,4 @@
 #define _GNU_SOURCE
-#define _FILE_OFFSET_BITS 64
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +14,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/io.h>
-#include <linux/fs.h>	/* BLKGETSIZE64 */
+#include <sys/time.h>
 #include <x86emu.h>
 
 #define STR_SIZE 128
@@ -40,11 +39,14 @@ void help(void);
 void vm_write_byte(vm_t *vm, unsigned addr, unsigned val, unsigned perm);
 void vm_write_word(vm_t *vm, unsigned addr, unsigned val, unsigned perm);
 void vm_write_dword(vm_t *vm, unsigned addr, unsigned val, unsigned perm);
+double get_time(void);
+int probe_port(vm_t *vm, unsigned port);
+void probe_all(vm_t *vm);
 vm_t *vm_new(void);
 void vm_free(vm_t *vm);
-void vm_run(vm_t *vm);
+unsigned vm_run(x86emu_t *emu, double *t);
 int do_int(x86emu_t *emu, u8 num, unsigned type);
-int prepare_bios(vm_t *vm);
+int vm_prepare(vm_t *vm);
 void copy_to_vm(vm_t *vm, unsigned dst, unsigned char *src, unsigned size, unsigned perm);
 void *map_mem(unsigned start, unsigned size);
 
@@ -59,7 +61,7 @@ struct option options[] = {
   { "show",       1, NULL, 1005 },
   { "no-show",    1, NULL, 1006 },
   { "port",       1, NULL, 1007 },
-  { "raw",        0, NULL, 1008 },
+  { "timeout",    1, NULL, 1008 },
   { "bios",       1, NULL, 1009 },
   { "bios-entry", 1, NULL, 1010 },
   { }
@@ -67,6 +69,9 @@ struct option options[] = {
 
 struct {
   unsigned port;
+  unsigned port_set:1;
+  unsigned verbose;
+  unsigned timeout;
 
   struct {
     unsigned code:1;
@@ -87,7 +92,6 @@ struct {
     unsigned tsc:1;
   } show;
 
-  unsigned raw:1;
   char *bios;
   unsigned bios_entry;
 
@@ -111,16 +115,12 @@ int main(int argc, char **argv)
 
     switch(i) {
       case 'v':
-        opt.show.dumpinvmem = 1;
-        opt.show.dumpattr = 1;
-        opt.show.dumpregs = 1;
-        opt.show.dumpints = 1;
-        opt.show.dumpio = 1;
-        opt.show.dumptime = 1;
+        opt.verbose++;
         break;
 
       case 1005:
       case 1006:
+        if(opt.verbose < 2) opt.verbose = 2;
         s = optarg;
         u = i == 1005 ? 1 : 0;
         while((t = strsep(&s, ","))) {
@@ -145,10 +145,11 @@ int main(int argc, char **argv)
 
       case 1007:
         opt.port = strtoul(optarg, NULL, 0);
+        opt.port_set = 1;
         break;
 
       case 1008:
-        opt.raw = 1;
+        opt.timeout = strtoul(optarg, NULL, 0);
         break;
 
       case 1009:
@@ -169,9 +170,14 @@ int main(int argc, char **argv)
 
   vm = vm_new();
 
-  if(!prepare_bios(vm)) return 1;
+  if(!vm_prepare(vm)) return 1;
 
-  vm_run(vm);
+  if(opt.port_set) {
+    probe_port(vm, opt.port);
+  }
+  else {
+    probe_all(vm);
+  }
 
   vm_free(vm);
 
@@ -200,17 +206,22 @@ void flush_log(x86emu_t *emu, char *buf, unsigned size)
 void help()
 {
   printf(
-    "Get Monitor Data\nusage: gmd options\n"
+    "Get Monitor Data\n"
+    "Usage: gmd [OPTIONS]\n"
+    "Reads monitor data via Video BIOS and shows the result.\n"
+    "If used without any options it probes the first 4 display ports.\n"
+    "\n"
+    "Options:\n"
     "  --port PORT_NUMBER\n"
-    "      display port number to use. Default: 0, typically 0 - 3.\n"
+    "      display port number to use. Typically 0 .. 3.\n"
+    "  --timeout SECONDS\n"
+    "      maximum probing time (default: 20s)\n"
     "  --show LIST\n"
     "      things to log\n"
     "      LIST is a comma-separated list of code, regs, data, io, ints, acc, tsc,\n"
     "      dump, dump.mem, dump.invmem, dump.attr, dump.regs, dump.io, dump.ints, dump.time\n"
     "  --no-show LIST\n"
     "      things not to log (see --show)\n"
-    "  --raw\n"
-    "      print DDC data in binary form to STDERR\n"
     "  --bios BIOS_IMAGE\n"
     "      use alternative Video BIOS (Don't try this at home!)\n"
     "  --bios-entry START_ADDRESS\n"
@@ -246,6 +257,149 @@ void vm_write_dword(vm_t *vm, unsigned addr, unsigned val, unsigned perm)
 }
 
 
+double get_time()
+{
+  static struct timeval t0 = { };
+  struct timeval t1 = { };
+
+  gettimeofday(&t1, NULL);
+
+  if(!timerisset(&t0)) t0 = t1;
+
+  timersub(&t1, &t0, &t1);
+
+  return t1.tv_sec + t1.tv_usec / 1e6;
+}
+
+
+void probe_all(vm_t *vm)
+{
+  x86emu_t *emu = NULL;
+  int err = 0, i;
+  unsigned port, cnt;
+  double d, timeout;
+  unsigned char edid[0x80];
+
+  if(opt.verbose >= 1) lprintf("=== running bios\n");
+
+  timeout = get_time() + (opt.timeout ?: 20);
+
+  for(port = 0; port < 4; port++) {
+    for(cnt = 0; cnt < 2 && get_time() <= timeout; cnt++) {
+      emu = x86emu_done(emu);
+      emu = x86emu_clone(vm->emu);
+
+      emu->x86.R_EAX = 0x4f15;
+      emu->x86.R_EBX = 1;
+      emu->x86.R_ECX = port;
+      emu->x86.R_EDX = 0;
+      emu->x86.R_EDI = 0x8000;
+
+      err = vm_run(emu, &d);
+
+      if(opt.verbose >= 2) lprintf("=== port %u, try %u: %s (time %.3fs, eax 0x%x, err = 0x%x)\n",
+        port,
+        cnt,
+        emu->x86.R_AX == 0x4f ? "ok" : "failed",
+        d,
+        emu->x86.R_EAX,
+        err
+      );
+
+      if(err || emu->x86.R_AX == 0x4f) break;
+    }
+
+    if(!emu) {
+      lprintf("=== timeout\n");
+      break;
+    }
+
+    if(opt.verbose == 1) lprintf("=== port %u: %s (time %.3fs, eax 0x%x, err = 0x%x)\n",
+      port,
+      emu->x86.R_AX == 0x4f ? "ok" : "failed",
+      d,
+      emu->x86.R_EAX,
+      err
+    );
+
+    for(i = 0; i < 0x80; i++) edid[i] = x86emu_read_byte(emu, 0x8000 + i);
+
+    if(opt.verbose >= 2) {
+      lprintf("=== port %u: ddc data ===\n", port);
+      for(i = 0; i < 0x80; i++) {
+        lprintf("%02x", edid[i]);
+        lprintf((i & 15) == 15 ? "\n" : " ");
+      }
+      lprintf("=== port %u: ddc data end ===\n", port);
+    }
+
+    if(!err && emu->x86.R_AX == 0x4f) {
+      lprintf("=== port %u: monitor info\n", port);
+      print_edid(port, edid);
+    }
+    else {
+      if(!err) err = -1;
+      lprintf("=== port %u: no monitor info\n", port);
+    }
+
+    emu = x86emu_done(emu);
+  }
+}
+
+
+int probe_port(vm_t *vm, unsigned port)
+{
+  x86emu_t *emu;
+  int err = 0, i;
+  double d;
+  unsigned char edid[0x80];
+
+  if(opt.verbose >= 1) lprintf("=== port %u: running bios\n", port);
+
+  emu = x86emu_clone(vm->emu);
+
+  emu->x86.R_EAX = 0x4f15;
+  emu->x86.R_EBX = 1;
+  emu->x86.R_ECX = port;
+  emu->x86.R_EDX = 0;
+  emu->x86.R_EDI = 0x8000;
+
+  err = vm_run(emu, &d);
+
+  if(opt.verbose >= 1) lprintf("=== port %u: %s (time %.3fs, eax 0x%x, err = 0x%x)\n",
+    port,
+    emu->x86.R_AX == 0x4f ? "ok" : "failed",
+    d,
+    emu->x86.R_EAX,
+    err
+  );
+
+  for(i = 0; i < 0x80; i++) edid[i] = x86emu_read_byte(emu, 0x8000 + i);
+
+  if(opt.verbose >= 2) {
+    lprintf("=== port %u: ddc data ===\n", port);
+    for(i = 0; i < 0x80; i++) {
+      lprintf("%02x", edid[i]);
+      lprintf((i & 15) == 15 ? "\n" : " ");
+    }
+    lprintf("=== port %u: ddc data end ===\n", port);
+  }
+
+  if(!err && emu->x86.R_AX == 0x4f) {
+    if(opt.verbose >= 1) lprintf("=== port %u: monitor info\n", port);
+    print_edid(port, edid);
+  }
+  else {
+    if(!err) err = -1;
+    lprintf("=== port %u: no monitor info\n", port);
+  }
+
+  x86emu_done(emu);
+
+  return err;
+}
+
+
 int do_int(x86emu_t *emu, u8 num, unsigned type)
 {
   if((type & 0xff) == INTR_TYPE_FAULT) x86emu_stop(emu);
@@ -278,27 +432,20 @@ void vm_free(vm_t *vm)
 }
 
 
-void vm_run(vm_t *vm)
+unsigned vm_run(x86emu_t *emu, double *t)
 {
   int i;
-  unsigned char edid[0x80];
+  unsigned err;
 
-  if(opt.show.regs) vm->emu->log.regs = 1;
-  if(opt.show.code) vm->emu->log.code = 1;
-  if(opt.show.data) vm->emu->log.data = 1;
-  if(opt.show.acc) vm->emu->log.acc = 1;
-  if(opt.show.io) vm->emu->log.io = 1;
-  if(opt.show.ints) vm->emu->log.ints = 1;
-  if(opt.show.tsc) vm->emu->log.tsc = 1;
+  if(opt.verbose >= 2) x86emu_log(emu, "=== emulation log ===\n");
 
-  if(x86emu_read_word(vm->emu, 0x7c00) == 0) return;
-
-  // stack & buffer space
-  x86emu_set_perm(vm->emu, 0x8000, 0xffff, X86EMU_PERM_RW);
+  *t = get_time();
 
   iopl(3);
-  x86emu_run(vm->emu, X86EMU_RUN_LOOP | X86EMU_RUN_NO_CODE);
+  err = x86emu_run(emu, X86EMU_RUN_LOOP | X86EMU_RUN_NO_CODE | X86EMU_RUN_TIMEOUT);
   iopl(0);
+
+  *t = get_time() - *t;
 
   i = 0;
   if(opt.show.dump) i |= -1;
@@ -317,42 +464,25 @@ void vm_run(vm_t *vm)
   if(opt.show.dumptime) i |= X86EMU_DUMP_TIME;
 
   if(i) {
-    x86emu_log(vm->emu, "\n; - - - emulator state\n");
-    x86emu_dump(vm->emu, i);
-    x86emu_log(vm->emu, "; - - -\n");
+    x86emu_log(emu, "\n; - - - final state\n");
+    x86emu_dump(emu, i);
+    x86emu_log(emu, "; - - -\n");
   }
 
-  x86emu_clear_log(vm->emu, 1);
+  if(opt.verbose >= 2) x86emu_log(emu, "=== emulation log end ===\n");
 
-  printf("port = %u, eax = %08x\n", opt.port, vm->emu->x86.R_EAX);
+  x86emu_clear_log(emu, 1);
 
-  for(i = 0; i < 0x80; i++) edid[i] = x86emu_read_byte(vm->emu, 0x8000 + i);
-
-  if(opt.raw) {
-    for(i = 0; i < 0x80; i++) fputc(edid[i], stderr);
-  }
-  else {
-    printf("- ddc data, port %d -\n", opt.port);
-    for(i = 0; i < 0x80; i++) {
-      printf("%02x", edid[i]);
-      printf((i & 15) == 15 ? "\n" : " ");
-    }
-    printf("- -\n");
-  }
-
-  if(vm->emu->x86.R_EAX == 0x4f) {
-    print_edid(opt.port, edid);
-  }
-  else {
-    printf("Port %u: no monitor info\n", opt.port);
-  }
+  return err;
 }
 
 
-int prepare_bios(vm_t *vm)
+int vm_prepare(vm_t *vm)
 {
   int ok = 0;
   unsigned char *p1, *p2;
+
+  if(opt.verbose >= 2) lprintf("=== bios setup ===\n");
 
   if(opt.bios) {
     unsigned char buf[VBIOS_SIZE];
@@ -372,16 +502,14 @@ int prepare_bios(vm_t *vm)
         return ok;
       }
       else {
-        lprintf("video bios: read %d bytes from %s\n", i, opt.bios);
+        if(opt.verbose >= 2) lprintf("video bios: read %d bytes from %s\n", i, opt.bios);
         if(buf[0] != 0x55 || buf[1] != 0xaa || buf[2] == 0) {
           lprintf("error: no video bios\n");
           return ok;
         }
 
-        lprintf("video bios: size: 0x%04x\n", buf[2] * 0x200);
         copy_to_vm(vm, 0xc0000, buf, buf[2] * 0x200, X86EMU_PERM_RX);
 
-        lprintf("video bios: bios entry: 0xc000:0x%04x\n", opt.bios_entry);
         vm_write_word(vm, 0x10*4, opt.bios_entry, X86EMU_PERM_RW);
         vm_write_word(vm, 0x10*4+2, 0xc000, X86EMU_PERM_RW);
       }
@@ -406,10 +534,17 @@ int prepare_bios(vm_t *vm)
       return ok;
     }
 
-    lprintf("video bios size: 0x%04x\n", p2[2] * 0x200);
     copy_to_vm(vm, 0xc0000, p2, p2[2] * 0x200, X86EMU_PERM_RX);
 
     munmap(p2, VBIOS_SIZE);
+  }
+
+  if(opt.verbose >= 2) {
+    lprintf("video bios: size 0x%04x\n", x86emu_read_byte(vm->emu, 0xc0002) * 0x200);
+    lprintf("video bios: entry 0x%04x:0x%04x\n",
+      x86emu_read_word(vm->emu, 0x10*4 +  2),
+      x86emu_read_word(vm->emu, 0x10*4)
+    );
   }
 
   // jmp far 0:0x7c00
@@ -417,14 +552,22 @@ int prepare_bios(vm_t *vm)
   vm_write_word(vm, 0xffff1, 0x7c00, X86EMU_PERM_RX);
   vm_write_word(vm, 0xffff3, 0x0000, X86EMU_PERM_RX);
 
+  // int 0x10 ; hlt
   vm_write_word(vm, 0x7c00, 0x10cd, X86EMU_PERM_RX);
   vm_write_byte(vm, 0x7c02, 0xf4, X86EMU_PERM_RX);
 
-  vm->emu->x86.R_EAX = 0x4f15;
-  vm->emu->x86.R_EBX = 1;
-  vm->emu->x86.R_ECX = opt.port;
-  vm->emu->x86.R_EDX = 0;
-  vm->emu->x86.R_EDI = 0x8000;
+  // stack & buffer space
+  x86emu_set_perm(vm->emu, 0x8000, 0xffff, X86EMU_PERM_RW);
+
+  if(opt.show.regs) vm->emu->log.regs = 1;
+  if(opt.show.code) vm->emu->log.code = 1;
+  if(opt.show.data) vm->emu->log.data = 1;
+  if(opt.show.acc) vm->emu->log.acc = 1;
+  if(opt.show.io) vm->emu->log.io = 1;
+  if(opt.show.ints) vm->emu->log.ints = 1;
+  if(opt.show.tsc) vm->emu->log.tsc = 1;
+
+  if(opt.timeout) vm->emu->timeout = opt.timeout ?: 20;
 
   ok = 1;
 
@@ -460,7 +603,7 @@ void *map_mem(unsigned start, unsigned size)
     return NULL;
   }
 
-  lprintf("[0x%x, %u]: mmap ok\n", start, size);
+  if(opt.verbose >= 3) lprintf("[0x%x, %u]: mmap ok\n", start, size);
 
   close(fd);
 
@@ -494,9 +637,11 @@ void print_edid(int port, unsigned char *edid)
 
 
   if(!chk_edid_info(edid)) {
-    printf("Port %u: no monitor info\n", port);
+    lprintf("Port %u: no monitor info\n", port);
     return;
   }
+
+  // lprintf("Port: %u\n", port);
 
   if(edid[0x14] & 0x80) m.lcd = 1;
 
@@ -677,13 +822,13 @@ void print_edid(int port, unsigned char *edid)
     }
   }
 
-  printf("Model: %s %04x", eisa_vendor(m.vendor_id), m.product_id);
+  lprintf("Model: %s %04x", eisa_vendor(m.vendor_id), m.product_id);
   if(*m.vendor_name || *m.product_name) {
-    printf(" (%s%s%s)", m.vendor_name, *m.vendor_name ? " " : "", m.product_name);
+    lprintf(" (%s%s%s)", m.vendor_name, *m.vendor_name ? " " : "", m.product_name);
   }
-  if(m.lcd) printf(" [LCD]");
+  if(m.lcd) lprintf(" [LCD]");
 
-  printf("\nManuf. Year: %u\n", m.year);
+  lprintf("\nManuf. Year: %u\n", m.year);
 
   if(mi_cnt) {
     u1 = mi_list[0].width_mm;
@@ -694,40 +839,40 @@ void print_edid(int port, unsigned char *edid)
     u2 = m.height_mm;
   }
 
-  printf("Size: %ux%u mm\n", u1, u2);
+  lprintf("Size: %ux%u mm\n", u1, u2);
 
-  printf("VSync: %u-%u Hz, HSync: %u-%u kHz\n", m.min_vsync, m.max_vsync, m.min_hsync, m.max_hsync);
+  lprintf("VSync: %u-%u Hz, HSync: %u-%u kHz\n", m.min_vsync, m.max_vsync, m.min_hsync, m.max_hsync);
 
-  printf("Resolutions:\n");
+  lprintf("Resolutions:\n");
   for(i = 0; i < res_cnt; i++) {
-    printf("%s", i % 4 == 0 ? "  " : ", ");
-    printf("%ux%u@%uHz%s",
+    lprintf("%s", i % 4 == 0 ? "  " : ", ");
+    lprintf("%ux%u@%uHz%s",
       res[i].width, res[i].height, res[i].vfreq,
       res[i].il ? " (interlaced)" : ""
     );
-    printf("%s", i % 4 == 3 ? "\n" : "");
+    lprintf("%s", i % 4 == 3 ? "\n" : "");
   }
-  printf("%s", i % 4 ? "\n" : "");
+  lprintf("%s", i % 4 ? "\n" : "");
 
   for(i = 0; i < mi_cnt; i++)  {
     mi = mi_list + i;
     if(mi->htotal && mi->vtotal) {
-      printf("Detailed Timings #%d:\n", i);
-      printf("   Resolution: %ux%u\n", mi->width, mi->height);
-      printf(
+      lprintf("Detailed Timings #%d:\n", i);
+      lprintf("   Resolution: %ux%u\n", mi->width, mi->height);
+      lprintf(
         "   Horizontal: %4u %4u %4u %4u (+%u +%u +%u) %chsync\n",
         mi->hdisp, mi->hsyncstart, mi->hsyncend, mi->htotal,
         mi->hsyncstart - mi->hdisp, mi->hsyncend - mi->hdisp, mi->htotal - mi->hdisp,
         mi->hflag
       );
-      printf(
+      lprintf(
         "     Vertical: %4u %4u %4u %4u (+%u +%u +%u) %cvsync\n",
         mi->vdisp, mi->vsyncstart, mi->vsyncend, mi->vtotal,
         mi->vsyncstart - mi->vdisp, mi->vsyncend - mi->vdisp, mi->vtotal - mi->vdisp,
         mi->vflag
       );
 
-      printf(
+      lprintf(
         "  Frequencies: %u.%02u MHz, %u.%02u kHz, %u.%02u Hz\n",
         mi->clock / 1000, (mi->clock * 100 / 1000) % 100,
         mi->clock / mi->htotal, (mi->clock * 100 / mi->htotal) % 100,
