@@ -139,6 +139,10 @@ int main(int argc, char **argv)
           else if(!strcmp(t, "dump.io")) opt.show.dumpio = u;
           else if(!strcmp(t, "dump.time")) opt.show.dumptime = u;
           else if(!strcmp(t, "tsc")) opt.show.tsc = u;
+          else if(!strcmp(t, "trace")) {
+            opt.show.regs = opt.show.data = opt.show.code =
+            opt.show.io = opt.show.ints = u;
+          }
           else err = 5;
         }
         break;
@@ -210,24 +214,29 @@ void help()
     "Usage: gmd [OPTIONS]\n"
     "Reads monitor data via Video BIOS and shows the result.\n"
     "If used without any options it probes the first 4 display ports.\n"
+    "This program needs root privileges to work properly.\n"
     "\n"
     "Options:\n"
     "  --port PORT_NUMBER\n"
-    "      display port number to use. Typically 0 .. 3.\n"
+    "      Display port number to use, typically 0 .. 3.\n"
     "  --timeout SECONDS\n"
-    "      maximum probing time (default: 20s)\n"
+    "      Maximum probing time (default: 20s).\n"
     "  --show LIST\n"
-    "      things to log\n"
-    "      LIST is a comma-separated list of code, regs, data, io, ints, acc, tsc,\n"
-    "      dump, dump.mem, dump.invmem, dump.attr, dump.regs, dump.io, dump.ints, dump.time\n"
+    "      Things to log. LIST is a comma-separated list of code, regs, data,\n"
+    "      io, ints, acc, tsc, dump.mem, dump.invmem, dump.attr, dump.regs,\n"
+    "      dump.io, dump.ints, dump.time.\n"
+    "      Or use trace and dump as shorthands for a useful combination of items\n"
+    "      from the above list.\n"
     "  --no-show LIST\n"
-    "      things not to log (see --show)\n"
-    "  --bios BIOS_IMAGE\n"
-    "      use alternative Video BIOS (Don't try this at home!)\n"
+    "      Things not to log (see --show).\n"
+    "  -v, --verbose\n"
+    "      Show more log messages. Repeat option to show even more.\n"
+    "  --bios BIOS_IMAGE_FILE\n"
+    "      Use alternative Video BIOS (Don't try this at home!).\n"
     "  --bios-entry START_ADDRESS\n"
-    "      specify start address for Video BIOS\n"
-    "  --help\n"
-    "      show this text\n"
+    "      In combination with --bios: start address for Video BIOS.\n"
+    "  -h, --help\n"
+    "      Show this text.\n"
   );
 }
 
