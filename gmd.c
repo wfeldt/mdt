@@ -173,6 +173,8 @@ int main(int argc, char **argv)
 
   vm_run(vm);
 
+  vm_free(vm);
+
   return 0;
 }
 
@@ -270,6 +272,8 @@ vm_t *vm_new()
 
 void vm_free(vm_t *vm)
 {
+  x86emu_done(vm->emu);
+
   free(vm);
 }
 
