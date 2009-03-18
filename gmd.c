@@ -39,25 +39,31 @@ typedef struct {
 } vm_t;
 
 
+
+void help(void);
 void lprintf(const char *format, ...) __attribute__ ((format (printf, 1, 2)));
 void flush_log(x86emu_t *emu, char *buf, unsigned size);
 
-void help(void);
-void vm_write_byte(vm_t *vm, unsigned addr, unsigned val, unsigned perm);
-void vm_write_word(vm_t *vm, unsigned addr, unsigned val, unsigned perm);
-void vm_write_dword(vm_t *vm, unsigned addr, unsigned val, unsigned perm);
+void vm_write_byte(x86emu_t *emu, unsigned addr, unsigned val, unsigned perm);
+void vm_write_word(x86emu_t *emu, unsigned addr, unsigned val, unsigned perm);
+void vm_write_dword(x86emu_t *emu, unsigned addr, unsigned val, unsigned perm);
+void copy_to_vm(x86emu_t *emu, unsigned dst, unsigned char *src, unsigned size, unsigned perm);
+void copy_from_vm(x86emu_t *emu, void *dst, unsigned src, unsigned len);
+
 double get_time(void);
-void copy_from_emu(x86emu_t *emu, void *dst, unsigned src, unsigned len);
-int probe_port(vm_t *vm, unsigned port);
-void probe_all(vm_t *vm);
+void *map_mem(unsigned start, unsigned size);
+
+void print_vbe_info(vm_t *vm, x86emu_t *emu, unsigned mode);
 void list_modes(vm_t *vm, unsigned mode);
+
+void probe_all(vm_t *vm);
+int probe_port(vm_t *vm, unsigned port);
+
+int do_int(x86emu_t *emu, u8 num, unsigned type);
 vm_t *vm_new(void);
 void vm_free(vm_t *vm);
 unsigned vm_run(x86emu_t *emu, double *t);
-int do_int(x86emu_t *emu, u8 num, unsigned type);
 int vm_prepare(vm_t *vm);
-void copy_to_vm(vm_t *vm, unsigned dst, unsigned char *src, unsigned size, unsigned perm);
-void *map_mem(unsigned start, unsigned size);
 
 void print_edid(int port, unsigned char *edid);
 char *eisa_vendor(unsigned v);
@@ -216,24 +222,6 @@ int main(int argc, char **argv)
 }
 
 
-void lprintf(const char *format, ...)
-{
-  va_list args;
-
-  va_start(args, format);
-  if(opt.log_file) vfprintf(opt.log_file, format, args);
-  va_end(args);
-}
-
-
-void flush_log(x86emu_t *emu, char *buf, unsigned size)
-{
-  if(!buf || !size || !opt.log_file) return;
-
-  fwrite(buf, size, 1, opt.log_file);
-}
-
-
 void help()
 {
   printf(
@@ -272,28 +260,71 @@ void help()
 }
 
 
-void vm_write_byte(vm_t *vm, unsigned addr, unsigned val, unsigned perm)
+void lprintf(const char *format, ...)
 {
-  x86emu_write_byte_noperm(vm->emu, addr, val);
-  x86emu_set_perm(vm->emu, addr, addr, perm | X86EMU_ACC_W);
+  va_list args;
+
+  va_start(args, format);
+  if(opt.log_file) vfprintf(opt.log_file, format, args);
+  va_end(args);
 }
 
 
-void vm_write_word(vm_t *vm, unsigned addr, unsigned val, unsigned perm)
+void flush_log(x86emu_t *emu, char *buf, unsigned size)
 {
-  x86emu_write_byte_noperm(vm->emu, addr, val);
-  x86emu_write_byte_noperm(vm->emu, addr + 1, val >> 8);
-  x86emu_set_perm(vm->emu, addr, addr + 1, perm | X86EMU_ACC_W);
+  if(!buf || !size || !opt.log_file) return;
+
+  fwrite(buf, size, 1, opt.log_file);
 }
 
 
-void vm_write_dword(vm_t *vm, unsigned addr, unsigned val, unsigned perm)
+unsigned vm_read_segofs16(x86emu_t *emu, unsigned addr)
 {
-  x86emu_write_byte_noperm(vm->emu, addr, val);
-  x86emu_write_byte_noperm(vm->emu, addr + 1, val >> 8);
-  x86emu_write_byte_noperm(vm->emu, addr + 2, val >> 16);
-  x86emu_write_byte_noperm(vm->emu, addr + 3, val >> 24);
-  x86emu_set_perm(vm->emu, addr, addr + 3, perm | X86EMU_ACC_W);
+  return x86emu_read_word(emu, addr) + (x86emu_read_word(emu, addr + 2) << 4);
+}
+
+
+void vm_write_byte(x86emu_t *emu, unsigned addr, unsigned val, unsigned perm)
+{
+  x86emu_write_byte_noperm(emu, addr, val);
+  x86emu_set_perm(emu, addr, addr, perm | X86EMU_PERM_VALID);
+}
+
+
+void vm_write_word(x86emu_t *emu, unsigned addr, unsigned val, unsigned perm)
+{
+  x86emu_write_byte_noperm(emu, addr, val);
+  x86emu_write_byte_noperm(emu, addr + 1, val >> 8);
+  x86emu_set_perm(emu, addr, addr + 1, perm | X86EMU_PERM_VALID);
+}
+
+
+void vm_write_dword(x86emu_t *emu, unsigned addr, unsigned val, unsigned perm)
+{
+  x86emu_write_byte_noperm(emu, addr, val);
+  x86emu_write_byte_noperm(emu, addr + 1, val >> 8);
+  x86emu_write_byte_noperm(emu, addr + 2, val >> 16);
+  x86emu_write_byte_noperm(emu, addr + 3, val >> 24);
+  x86emu_set_perm(emu, addr, addr + 3, perm | X86EMU_PERM_VALID);
+}
+
+
+void copy_to_vm(x86emu_t *emu, unsigned dst, unsigned char *src, unsigned size, unsigned perm)
+{
+  if(!size) return;
+
+  while(size--) vm_write_byte(emu, dst++, *src++, perm);
+}
+
+
+void copy_from_vm(x86emu_t *emu, void *dst, unsigned src, unsigned len)
+{
+  unsigned char *p = dst;
+  unsigned u;
+
+  for(u = 0; u < len; u++) {
+    p[u] = x86emu_read_byte_noperm(emu, src + u);
+  }
 }
 
 
@@ -312,20 +343,31 @@ double get_time()
 }
 
 
-unsigned vm_read_segofs16(x86emu_t *emu, unsigned addr)
+void *map_mem(unsigned start, unsigned size)
 {
-  return x86emu_read_word(emu, addr) + (x86emu_read_word(emu, addr + 2) << 4);
-}
+  int fd;
+  void *p;
 
+  if(!size) return NULL;
 
-void copy_from_emu(x86emu_t *emu, void *dst, unsigned src, unsigned len)
-{
-  unsigned char *p = dst;
-  unsigned u;
+  fd = open("/dev/mem", O_RDONLY);
 
-  for(u = 0; u < len; u++) {
-    p[u] = x86emu_read_byte_noperm(emu, src + u);
+  if(fd == -1) return NULL;
+
+  p = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, start);
+
+  if(p == MAP_FAILED) {
+    lprintf("error: [0x%x, %u]: mmap failed: %s\n", start, size, strerror(errno));
+    close(fd);
+
+    return NULL;
   }
+
+  if(opt.verbose >= 3) lprintf("[0x%x, %u]: mmap ok\n", start, size);
+
+  close(fd);
+
+  return p;
 }
 
 
@@ -357,19 +399,19 @@ void print_vbe_info(vm_t *vm, x86emu_t *emu, unsigned mode)
     buf2[sizeof buf2 - 1] = 0;
 
     u = vm_read_segofs16(emu, VBE_BUF + 0x06);
-    copy_from_emu(emu, buf2, u, sizeof buf2 - 1);
+    copy_from_vm(emu, buf2, u, sizeof buf2 - 1);
     lprintf("oem name [0x%05x] = \"%s\"\n", u, buf2);
 
     u = vm_read_segofs16(emu, VBE_BUF + 0x16);
-    copy_from_emu(emu, buf2, u, sizeof buf2 - 1);
+    copy_from_vm(emu, buf2, u, sizeof buf2 - 1);
     lprintf("vendor name [0x%05x] = \"%s\"\n", u, buf2);
 
     u = vm_read_segofs16(emu, VBE_BUF + 0x1a);
-    copy_from_emu(emu, buf2, u, sizeof buf2 - 1);
+    copy_from_vm(emu, buf2, u, sizeof buf2 - 1);
     lprintf("product name [0x%05x] = \"%s\"\n", u, buf2);
 
     u = vm_read_segofs16(emu, VBE_BUF + 0x1e);
-    copy_from_emu(emu, buf2, u, sizeof buf2 - 1);
+    copy_from_vm(emu, buf2, u, sizeof buf2 - 1);
     lprintf("product revision [0x%05x] = \"%s\"\n", u, buf2);
   }
 
@@ -772,10 +814,10 @@ int vm_prepare(vm_t *vm)
           return ok;
         }
 
-        copy_to_vm(vm, VBIOS_ROM, buf, buf[2] * 0x200, X86EMU_PERM_RX);
+        copy_to_vm(vm->emu, VBIOS_ROM, buf, buf[2] * 0x200, X86EMU_PERM_RX);
 
-        vm_write_word(vm, 0x10*4, opt.bios_entry, X86EMU_PERM_RW);
-        vm_write_word(vm, 0x10*4+2, VBIOS_ROM >> 4, X86EMU_PERM_RW);
+        vm_write_word(vm->emu, 0x10*4, opt.bios_entry, X86EMU_PERM_RW);
+        vm_write_word(vm->emu, 0x10*4+2, VBIOS_ROM >> 4, X86EMU_PERM_RW);
       }
     }
   }
@@ -786,8 +828,8 @@ int vm_prepare(vm_t *vm)
       return ok;
     }
 
-    copy_to_vm(vm, 0x10*4, p1 + 0x10*4, 4, X86EMU_PERM_RW);
-    copy_to_vm(vm, 0x400, p1 + 0x400, 0x100, X86EMU_PERM_RW);
+    copy_to_vm(vm->emu, 0x10*4, p1 + 0x10*4, 4, X86EMU_PERM_RW);
+    copy_to_vm(vm->emu, 0x400, p1 + 0x400, 0x100, X86EMU_PERM_RW);
 
     munmap(p1, 0x1000);
 
@@ -798,7 +840,7 @@ int vm_prepare(vm_t *vm)
       return ok;
     }
 
-    copy_to_vm(vm, VBIOS_ROM, p2, p2[2] * 0x200, X86EMU_PERM_RX);
+    copy_to_vm(vm->emu, VBIOS_ROM, p2, p2[2] * 0x200, X86EMU_PERM_RX);
 
     munmap(p2, VBIOS_ROM_SIZE);
   }
@@ -822,13 +864,13 @@ int vm_prepare(vm_t *vm)
   }
 
   // jmp far 0:0x7c00
-  vm_write_byte(vm, 0xffff0, 0xea, X86EMU_PERM_RX);
-  vm_write_word(vm, 0xffff1, 0x7c00, X86EMU_PERM_RX);
-  vm_write_word(vm, 0xffff3, 0x0000, X86EMU_PERM_RX);
+  vm_write_byte(vm->emu, 0xffff0, 0xea, X86EMU_PERM_RX);
+  vm_write_word(vm->emu, 0xffff1, 0x7c00, X86EMU_PERM_RX);
+  vm_write_word(vm->emu, 0xffff3, 0x0000, X86EMU_PERM_RX);
 
   // int 0x10 ; hlt
-  vm_write_word(vm, 0x7c00, 0x10cd, X86EMU_PERM_RX);
-  vm_write_byte(vm, 0x7c02, 0xf4, X86EMU_PERM_RX);
+  vm_write_word(vm->emu, 0x7c00, 0x10cd, X86EMU_PERM_RX);
+  vm_write_byte(vm->emu, 0x7c02, 0xf4, X86EMU_PERM_RX);
 
   // stack & buffer space
   x86emu_set_perm(vm->emu, VBE_BUF, 0xffff, X86EMU_PERM_RW);
@@ -846,42 +888,6 @@ int vm_prepare(vm_t *vm)
   ok = 1;
 
   return ok;
-}
-
-
-void copy_to_vm(vm_t *vm, unsigned dst, unsigned char *src, unsigned size, unsigned perm)
-{
-  if(!size) return;
-
-  while(size--) vm_write_byte(vm, dst++, *src++, perm);
-}
-
-
-void *map_mem(unsigned start, unsigned size)
-{
-  int fd;
-  void *p;
-
-  if(!size) return NULL;
-
-  fd = open("/dev/mem", O_RDONLY);
-
-  if(fd == -1) return NULL;
-
-  p = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, start);
-
-  if(p == MAP_FAILED) {
-    lprintf("error: [0x%x, %u]: mmap failed: %s\n", start, size, strerror(errno));
-    close(fd);
-
-    return NULL;
-  }
-
-  if(opt.verbose >= 3) lprintf("[0x%x, %u]: mmap ok\n", start, size);
-
-  close(fd);
-
-  return p;
 }
 
 
