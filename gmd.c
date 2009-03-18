@@ -239,7 +239,7 @@ void help()
   printf(
     "Get Monitor Data\n"
     "Usage: gmd [OPTIONS]\n"
-    "Reads monitor data via Video BIOS and shows the result.\n"
+    "Read monitor data via Video BIOS and show the result.\n"
     "If used without any options it probes the first 4 display ports.\n"
     "This program needs root privileges to work properly.\n"
     "\n"
