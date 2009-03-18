@@ -25,6 +25,7 @@
 #define VBIOS_MEM	0xa0000
 #define VBIOS_MEM_SIZE	0x10000
 
+#define VBE_BUF		0x8000
 
 #define ADD_RES(w, h, f, i) \
   res[res_cnt].width = w, \
@@ -46,8 +47,10 @@ void vm_write_byte(vm_t *vm, unsigned addr, unsigned val, unsigned perm);
 void vm_write_word(vm_t *vm, unsigned addr, unsigned val, unsigned perm);
 void vm_write_dword(vm_t *vm, unsigned addr, unsigned val, unsigned perm);
 double get_time(void);
+void copy_from_emu(x86emu_t *emu, void *dst, unsigned src, unsigned len);
 int probe_port(vm_t *vm, unsigned port);
 void probe_all(vm_t *vm);
+void list_modes(vm_t *vm, unsigned mode);
 vm_t *vm_new(void);
 void vm_free(vm_t *vm);
 unsigned vm_run(x86emu_t *emu, double *t);
@@ -64,6 +67,8 @@ int chk_edid_info(unsigned char *edid);
 struct option options[] = {
   { "help",       0, NULL, 'h'  },
   { "verbose",    0, NULL, 'v'  },
+  { "modes",      0, NULL, 1003 },
+  { "mode",       1, NULL, 1004 },
   { "show",       1, NULL, 1005 },
   { "no-show",    1, NULL, 1006 },
   { "port",       1, NULL, 1007 },
@@ -78,6 +83,10 @@ struct {
   unsigned port_set:1;
   unsigned verbose;
   unsigned timeout;
+
+  unsigned all_modes:1;
+  unsigned mode;
+  unsigned mode_set:1;
 
   struct {
     unsigned code:1;
@@ -122,6 +131,15 @@ int main(int argc, char **argv)
     switch(i) {
       case 'v':
         opt.verbose++;
+        break;
+
+      case 1003:
+        opt.all_modes = 1;
+        break;
+
+      case 1004:
+        opt.mode = strtoul(optarg, NULL, 0);
+        opt.mode_set = 1;
         break;
 
       case 1005:
@@ -182,7 +200,10 @@ int main(int argc, char **argv)
 
   if(!vm_prepare(vm)) return 1;
 
-  if(opt.port_set) {
+  if(opt.all_modes || opt.mode_set) {
+    list_modes(vm, opt.mode_set ? opt.mode : 0);
+  }
+  else if(opt.port_set) {
     probe_port(vm, opt.port);
   }
   else {
@@ -241,6 +262,10 @@ void help()
     "      Use alternative Video BIOS (Don't try this at home!).\n"
     "  --bios-entry START_ADDRESS\n"
     "      In combination with --bios: start address for Video BIOS.\n"
+    "  --modes\n"
+    "      Show video mode list.\n"
+    "  --mode MODE_NUMBER\n"
+    "      Show info for video mode MODE_NUMBER.\n"
     "  -h, --help\n"
     "      Show this text.\n"
   );
@@ -287,6 +312,222 @@ double get_time()
 }
 
 
+unsigned vm_read_segofs16(x86emu_t *emu, unsigned addr)
+{
+  return x86emu_read_word(emu, addr) + (x86emu_read_word(emu, addr + 2) << 4);
+}
+
+
+void copy_from_emu(x86emu_t *emu, void *dst, unsigned src, unsigned len)
+{
+  unsigned char *p = dst;
+  unsigned u;
+
+  for(u = 0; u < len; u++) {
+    p[u] = x86emu_read_byte_noperm(emu, src + u);
+  }
+}
+
+
+void print_vbe_info(vm_t *vm, x86emu_t *emu, unsigned mode)
+{
+  unsigned char buf2[0x100];
+  unsigned u, ml;
+  unsigned modelist[0x100];
+  unsigned modes, number;
+  int err;
+  double d;
+  char s[64];
+  unsigned version, oem_version, memory, attributes, width, height, bytes_p_line;
+  unsigned win_A_start, win_B_start, win_A_attr, win_B_attr, win_gran, win_size;
+  unsigned bpp, res_bpp, fb_start, pixel_clock;
+
+  version = x86emu_read_word(emu, VBE_BUF + 0x04);
+  oem_version = x86emu_read_word(emu, VBE_BUF + 0x14);
+  memory = x86emu_read_word(emu, VBE_BUF + 0x12) << 16;
+
+  if(!mode) {
+    lprintf(
+      "version = %u.%u, oem version = %u.%u\n",
+      version >> 8, version & 0xff, oem_version >> 8, oem_version & 0xff
+    );
+
+    lprintf("memory = %uk\n", memory >> 10);
+
+    buf2[sizeof buf2 - 1] = 0;
+
+    u = vm_read_segofs16(emu, VBE_BUF + 0x06);
+    copy_from_emu(emu, buf2, u, sizeof buf2 - 1);
+    lprintf("oem name [0x%05x] = \"%s\"\n", u, buf2);
+
+    u = vm_read_segofs16(emu, VBE_BUF + 0x16);
+    copy_from_emu(emu, buf2, u, sizeof buf2 - 1);
+    lprintf("vendor name [0x%05x] = \"%s\"\n", u, buf2);
+
+    u = vm_read_segofs16(emu, VBE_BUF + 0x1a);
+    copy_from_emu(emu, buf2, u, sizeof buf2 - 1);
+    lprintf("product name [0x%05x] = \"%s\"\n", u, buf2);
+
+    u = vm_read_segofs16(emu, VBE_BUF + 0x1e);
+    copy_from_emu(emu, buf2, u, sizeof buf2 - 1);
+    lprintf("product revision [0x%05x] = \"%s\"\n", u, buf2);
+  }
+
+  ml = vm_read_segofs16(emu, VBE_BUF + 0x0e);
+
+  for(modes = 0; modes < sizeof modelist / sizeof *modelist; ) {
+    u = x86emu_read_word(emu, ml + 2 * modes);
+    if(u == 0xffff) break;
+    modelist[modes++] = u;
+  }
+
+  if(!mode) lprintf("%u video modes:\n", modes);
+
+  emu = NULL;
+
+  for(u = 0; u < modes; u++) {
+    number = modelist[u];
+    if(mode && number != mode) continue;
+
+    x86emu_done(emu);
+    emu = x86emu_clone(vm->emu);
+
+    emu->x86.R_EAX = 0x4f01;
+    emu->x86.R_EBX = 0;
+    emu->x86.R_ECX = number;
+    emu->x86.R_EDX = 0;
+    emu->x86.R_EDI = VBE_BUF;
+
+    err = vm_run(emu, &d);
+
+    if(opt.verbose >= 1) lprintf("=== vbe get mode info (0x%04x): %s (time %.3fs, eax 0x%x, err = 0x%x)\n",
+      number,
+      emu->x86.R_AX == 0x4f ? "ok" : "failed",
+      d,
+      emu->x86.R_EAX,
+      err
+    );
+
+    if(err || emu->x86.R_AX != 0x4f) {
+      lprintf("  0x%04x: no mode info\n", number);
+      continue;
+    }
+
+    attributes = x86emu_read_word(emu, VBE_BUF + 0x00);
+
+    width = x86emu_read_word(emu, VBE_BUF + 0x12);
+    height = x86emu_read_word(emu, VBE_BUF + 0x14);
+    bytes_p_line = x86emu_read_word(emu, VBE_BUF + 0x10);
+
+    win_A_start = x86emu_read_word(emu, VBE_BUF + 0x08) << 4;
+    win_B_start = x86emu_read_word(emu, VBE_BUF + 0x0a) << 4;
+
+    win_A_attr = x86emu_read_byte(emu, VBE_BUF + 0x02);
+    win_B_attr = x86emu_read_byte(emu, VBE_BUF + 0x03);
+
+    win_gran = x86emu_read_word(emu, VBE_BUF + 0x04) << 10;
+    win_size = x86emu_read_word(emu, VBE_BUF + 0x06) << 10;
+
+    bpp = res_bpp = 0;
+
+    switch(x86emu_read_byte(emu, VBE_BUF + 0x1b)) {
+      case 0:
+        bpp = -1;
+        break;
+
+      case 1:
+        bpp = 2;
+        break;
+
+      case 2:
+        bpp = 1;
+        break;
+
+      case 3:
+        bpp = 4;
+        break;
+
+      case 4:
+        bpp = 8;
+        break;
+
+      case 6:
+        bpp = x86emu_read_byte(emu, VBE_BUF + 0x1f) +
+          x86emu_read_byte(emu, VBE_BUF + 0x21) +
+          x86emu_read_byte(emu, VBE_BUF + 0x23);
+        res_bpp = x86emu_read_byte(emu, VBE_BUF + 0x19) - bpp;
+        if(res_bpp < 0) res_bpp = 0;
+    }
+
+    fb_start = version >= 0x0200 ? x86emu_read_dword(emu, VBE_BUF + 0x28) : 0;
+
+    pixel_clock = version >= 0x0300 ? x86emu_read_dword(emu, VBE_BUF + 0x3e) : 0;
+
+    if(bpp == -1u) {
+      lprintf("  0x%04x[%02x]: %ux%u, text\n", number, attributes, width, height);
+    }
+    else {
+      *s = 0;
+      if(res_bpp) sprintf(s, "+%d", res_bpp);
+      lprintf("  0x%04x[%02x]: %ux%u+%u, %u%s bpp",
+        number, attributes, width, height, bytes_p_line, bpp, s
+      );
+
+      if(pixel_clock) lprintf(", max. %u MHz", pixel_clock/1000000);
+      if(fb_start) lprintf(", fb: 0x%08x", fb_start);
+      lprintf(", %04x.%x", win_A_start, win_A_attr);
+      if(win_B_start || win_B_attr) lprintf("/%04x.%x", win_B_start, win_B_attr);
+      lprintf(": %uk", win_size >> 10);
+      if(win_gran != win_size) lprintf("/%uk", win_gran >> 10);
+      lprintf("\n");
+    }
+  }
+
+  emu = x86emu_done(emu);
+}
+
+
+void list_modes(vm_t *vm, unsigned mode)
+{
+  x86emu_t *emu = NULL;
+  int err = 0;
+  double d, timeout;
+
+  if(opt.verbose >= 1) lprintf("=== running bios\n");
+
+  timeout = get_time() + (opt.timeout ?: 20);
+
+  emu = x86emu_clone(vm->emu);
+
+  emu->x86.R_EAX = 0x4f00;
+  emu->x86.R_EBX = 0;
+  emu->x86.R_ECX = 0;
+  emu->x86.R_EDX = 0;
+  emu->x86.R_EDI = VBE_BUF;
+
+  x86emu_write_dword(emu, VBE_BUF, 0x32454256);		// "VBE2"
+
+  err = vm_run(emu, &d);
+
+  if(opt.verbose >= 1) lprintf("=== vbe get info: %s (time %.3fs, eax 0x%x, err = 0x%x)\n",
+    emu->x86.R_AX == 0x4f ? "ok" : "failed",
+    d,
+    emu->x86.R_EAX,
+    err
+  );
+
+  if(!err && emu->x86.R_AX == 0x4f) {
+    if(opt.verbose >= 1) lprintf("=== vbe info\n");
+    print_vbe_info(vm, emu, mode);
+  }
+  else {
+    lprintf("=== no vbe info\n");
+  }
+
+  x86emu_done(emu);
+}
+
+
 void probe_all(vm_t *vm)
 {
   x86emu_t *emu = NULL;
@@ -308,7 +549,7 @@ void probe_all(vm_t *vm)
       emu->x86.R_EBX = 1;
       emu->x86.R_ECX = port;
       emu->x86.R_EDX = 0;
-      emu->x86.R_EDI = 0x8000;
+      emu->x86.R_EDI = VBE_BUF;
 
       err = vm_run(emu, &d);
 
@@ -337,7 +578,7 @@ void probe_all(vm_t *vm)
       err
     );
 
-    for(i = 0; i < 0x80; i++) edid[i] = x86emu_read_byte(emu, 0x8000 + i);
+    for(i = 0; i < 0x80; i++) edid[i] = x86emu_read_byte(emu, VBE_BUF + i);
 
     if(opt.verbose >= 2) {
       lprintf("=== port %u: ddc data ===\n", port);
@@ -377,7 +618,7 @@ int probe_port(vm_t *vm, unsigned port)
   emu->x86.R_EBX = 1;
   emu->x86.R_ECX = port;
   emu->x86.R_EDX = 0;
-  emu->x86.R_EDI = 0x8000;
+  emu->x86.R_EDI = VBE_BUF;
 
   err = vm_run(emu, &d);
 
@@ -389,7 +630,7 @@ int probe_port(vm_t *vm, unsigned port)
     err
   );
 
-  for(i = 0; i < 0x80; i++) edid[i] = x86emu_read_byte(emu, 0x8000 + i);
+  for(i = 0; i < 0x80; i++) edid[i] = x86emu_read_byte(emu, VBE_BUF + i);
 
   if(opt.verbose >= 2) {
     lprintf("=== port %u: ddc data ===\n", port);
@@ -590,7 +831,7 @@ int vm_prepare(vm_t *vm)
   vm_write_byte(vm, 0x7c02, 0xf4, X86EMU_PERM_RX);
 
   // stack & buffer space
-  x86emu_set_perm(vm->emu, 0x8000, 0xffff, X86EMU_PERM_RW);
+  x86emu_set_perm(vm->emu, VBE_BUF, 0xffff, X86EMU_PERM_RW);
 
   if(opt.show.regs) vm->emu->log.regs = 1;
   if(opt.show.code) vm->emu->log.code = 1;
