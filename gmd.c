@@ -39,7 +39,6 @@ typedef struct {
 } vm_t;
 
 
-
 void help(void);
 void lprintf(const char *format, ...) __attribute__ ((format (printf, 1, 2)));
 void flush_log(x86emu_t *emu, char *buf, unsigned size);
@@ -50,6 +49,12 @@ void vm_write_dword(x86emu_t *emu, unsigned addr, unsigned val, unsigned perm);
 void copy_to_vm(x86emu_t *emu, unsigned dst, unsigned char *src, unsigned size, unsigned perm);
 void copy_from_vm(x86emu_t *emu, void *dst, unsigned src, unsigned len);
 
+int do_int(x86emu_t *emu, u8 num, unsigned type);
+vm_t *vm_new(void);
+void vm_free(vm_t *vm);
+unsigned vm_run(x86emu_t *emu, double *t);
+int vm_prepare(vm_t *vm);
+
 double get_time(void);
 void *map_mem(unsigned start, unsigned size);
 
@@ -59,16 +64,11 @@ void list_modes(vm_t *vm, unsigned mode);
 void probe_all(vm_t *vm);
 int probe_port(vm_t *vm, unsigned port);
 
-int do_int(x86emu_t *emu, u8 num, unsigned type);
-vm_t *vm_new(void);
-void vm_free(vm_t *vm);
-unsigned vm_run(x86emu_t *emu, double *t);
-int vm_prepare(vm_t *vm);
-
 void print_edid(int port, unsigned char *edid);
 char *eisa_vendor(unsigned v);
 char *canon_str(unsigned char *s, int len);
 int chk_edid_info(unsigned char *edid);
+
 
 struct option options[] = {
   { "help",       0, NULL, 'h'  },
@@ -325,6 +325,199 @@ void copy_from_vm(x86emu_t *emu, void *dst, unsigned src, unsigned len)
   for(u = 0; u < len; u++) {
     p[u] = x86emu_read_byte_noperm(emu, src + u);
   }
+}
+
+
+int do_int(x86emu_t *emu, u8 num, unsigned type)
+{
+  if((type & 0xff) == INTR_TYPE_FAULT) {
+    x86emu_stop(emu);
+
+    return 0;
+  }
+
+  // ignore ints != 0x10
+  if(num != 0x10) return 1;
+
+  return 0;
+}
+
+
+vm_t *vm_new()
+{
+  vm_t *vm;
+
+  vm = calloc(1, sizeof *vm);
+
+  vm->emu = x86emu_new(0, X86EMU_PERM_RW);
+  vm->emu->private = vm;
+
+  x86emu_set_log(vm->emu, 200000000, flush_log);
+  x86emu_set_intr_handler(vm->emu, do_int);
+
+  return vm;
+}
+
+
+void vm_free(vm_t *vm)
+{
+  x86emu_done(vm->emu);
+
+  free(vm);
+}
+
+
+unsigned vm_run(x86emu_t *emu, double *t)
+{
+  int i;
+  unsigned err;
+
+  if(opt.verbose >= 2) x86emu_log(emu, "=== emulation log ===\n");
+
+  *t = get_time();
+
+  iopl(3);
+  err = x86emu_run(emu, X86EMU_RUN_LOOP | X86EMU_RUN_NO_CODE | X86EMU_RUN_TIMEOUT);
+  iopl(0);
+
+  *t = get_time() - *t;
+
+  i = 0;
+  if(opt.show.dump) i |= -1;
+  if(opt.show.dumpinvmem) {
+    i |= X86EMU_DUMP_INV_MEM;
+    i &= ~X86EMU_DUMP_MEM;
+  }
+  if(opt.show.dumpmem) {
+    i |= X86EMU_DUMP_MEM;
+    i &= ~X86EMU_DUMP_INV_MEM;
+  }
+  if(opt.show.dumpattr) i |= X86EMU_DUMP_ATTR;
+  if(opt.show.dumpregs) i |= X86EMU_DUMP_REGS;
+  if(opt.show.dumpints) i |= X86EMU_DUMP_INTS;
+  if(opt.show.dumpio) i |= X86EMU_DUMP_IO;
+  if(opt.show.dumptime) i |= X86EMU_DUMP_TIME;
+
+  if(i) {
+    x86emu_log(emu, "\n; - - - final state\n");
+    x86emu_dump(emu, i);
+    x86emu_log(emu, "; - - -\n");
+  }
+
+  if(opt.verbose >= 2) x86emu_log(emu, "=== emulation log end ===\n");
+
+  x86emu_clear_log(emu, 1);
+
+  return err;
+}
+
+
+int vm_prepare(vm_t *vm)
+{
+  int ok = 0;
+  unsigned u;
+  unsigned char *p1, *p2;
+
+  if(opt.verbose >= 2) lprintf("=== bios setup ===\n");
+
+  if(opt.bios) {
+    unsigned char buf[VBIOS_ROM_SIZE];
+    int fd, i;
+
+    fd = open(opt.bios, O_RDONLY);
+    if(fd == -1) {
+      perror(opt.bios);
+      return ok;
+    }
+    else {
+      memset(buf, 0, sizeof buf);
+      i = read(fd, buf, sizeof buf);
+      close(fd);
+      if(i < 0) {
+        perror(opt.bios);
+        return ok;
+      }
+      else {
+        if(opt.verbose >= 2) lprintf("video bios: read %d bytes from %s\n", i, opt.bios);
+        if(buf[0] != 0x55 || buf[1] != 0xaa || buf[2] == 0) {
+          lprintf("error: no video bios\n");
+          return ok;
+        }
+
+        copy_to_vm(vm->emu, VBIOS_ROM, buf, buf[2] * 0x200, X86EMU_PERM_RX);
+
+        vm_write_word(vm->emu, 0x10*4, opt.bios_entry, X86EMU_PERM_RW);
+        vm_write_word(vm->emu, 0x10*4+2, VBIOS_ROM >> 4, X86EMU_PERM_RW);
+      }
+    }
+  }
+  else {
+    p1 = map_mem(0, 0x1000);
+    if(!p1) {
+      perror("/dev/mem");
+      return ok;
+    }
+
+    copy_to_vm(vm->emu, 0x10*4, p1 + 0x10*4, 4, X86EMU_PERM_RW);
+    copy_to_vm(vm->emu, 0x400, p1 + 0x400, 0x100, X86EMU_PERM_RW);
+
+    munmap(p1, 0x1000);
+
+    p2 = map_mem(VBIOS_ROM, VBIOS_ROM_SIZE);
+    if(!p2 || p2[0] != 0x55 || p2[1] != 0xaa || p2[2] == 0) {
+      if(p2) munmap(p2, VBIOS_ROM_SIZE);
+      lprintf("error: no video bios\n");
+      return ok;
+    }
+
+    copy_to_vm(vm->emu, VBIOS_ROM, p2, p2[2] * 0x200, X86EMU_PERM_RX);
+
+    munmap(p2, VBIOS_ROM_SIZE);
+  }
+
+  if(opt.verbose >= 2) {
+    lprintf("video bios: size 0x%04x\n", x86emu_read_byte(vm->emu, VBIOS_ROM + 2) * 0x200);
+    lprintf("video bios: entry 0x%04x:0x%04x\n",
+      x86emu_read_word(vm->emu, 0x10*4 +  2),
+      x86emu_read_word(vm->emu, 0x10*4)
+    );
+  }
+
+  // video memory
+  vm->video_mem = map_mem(VBIOS_MEM, VBIOS_MEM_SIZE);
+
+  if(vm->video_mem) {
+    x86emu_set_perm(vm->emu, VBIOS_MEM, VBIOS_MEM + VBIOS_MEM_SIZE - 1, X86EMU_PERM_RW);
+    for(u = 0; u < VBIOS_MEM_SIZE; u += X86EMU_PAGE_SIZE) {
+      x86emu_set_page(vm->emu, VBIOS_MEM + u, vm->video_mem + u);
+    }
+  }
+
+  // jmp far 0:0x7c00
+  vm_write_byte(vm->emu, 0xffff0, 0xea, X86EMU_PERM_RX);
+  vm_write_word(vm->emu, 0xffff1, 0x7c00, X86EMU_PERM_RX);
+  vm_write_word(vm->emu, 0xffff3, 0x0000, X86EMU_PERM_RX);
+
+  // int 0x10 ; hlt
+  vm_write_word(vm->emu, 0x7c00, 0x10cd, X86EMU_PERM_RX);
+  vm_write_byte(vm->emu, 0x7c02, 0xf4, X86EMU_PERM_RX);
+
+  // stack & buffer space
+  x86emu_set_perm(vm->emu, VBE_BUF, 0xffff, X86EMU_PERM_RW);
+
+  if(opt.show.regs) vm->emu->log.regs = 1;
+  if(opt.show.code) vm->emu->log.code = 1;
+  if(opt.show.data) vm->emu->log.data = 1;
+  if(opt.show.acc) vm->emu->log.acc = 1;
+  if(opt.show.io) vm->emu->log.io = 1;
+  if(opt.show.ints) vm->emu->log.ints = 1;
+  if(opt.show.tsc) vm->emu->log.tsc = 1;
+
+  if(opt.timeout) vm->emu->timeout = opt.timeout ?: 20;
+
+  ok = 1;
+
+  return ok;
 }
 
 
@@ -695,199 +888,6 @@ int probe_port(vm_t *vm, unsigned port)
   x86emu_done(emu);
 
   return err;
-}
-
-
-int do_int(x86emu_t *emu, u8 num, unsigned type)
-{
-  if((type & 0xff) == INTR_TYPE_FAULT) {
-    x86emu_stop(emu);
-
-    return 0;
-  }
-
-  // ignore ints != 0x10
-  if(num != 0x10) return 1;
-
-  return 0;
-}
-
-
-vm_t *vm_new()
-{
-  vm_t *vm;
-
-  vm = calloc(1, sizeof *vm);
-
-  vm->emu = x86emu_new(0, X86EMU_PERM_RW);
-  vm->emu->private = vm;
-
-  x86emu_set_log(vm->emu, 200000000, flush_log);
-  x86emu_set_intr_handler(vm->emu, do_int);
-
-  return vm;
-}
-
-
-void vm_free(vm_t *vm)
-{
-  x86emu_done(vm->emu);
-
-  free(vm);
-}
-
-
-unsigned vm_run(x86emu_t *emu, double *t)
-{
-  int i;
-  unsigned err;
-
-  if(opt.verbose >= 2) x86emu_log(emu, "=== emulation log ===\n");
-
-  *t = get_time();
-
-  iopl(3);
-  err = x86emu_run(emu, X86EMU_RUN_LOOP | X86EMU_RUN_NO_CODE | X86EMU_RUN_TIMEOUT);
-  iopl(0);
-
-  *t = get_time() - *t;
-
-  i = 0;
-  if(opt.show.dump) i |= -1;
-  if(opt.show.dumpinvmem) {
-    i |= X86EMU_DUMP_INV_MEM;
-    i &= ~X86EMU_DUMP_MEM;
-  }
-  if(opt.show.dumpmem) {
-    i |= X86EMU_DUMP_MEM;
-    i &= ~X86EMU_DUMP_INV_MEM;
-  }
-  if(opt.show.dumpattr) i |= X86EMU_DUMP_ATTR;
-  if(opt.show.dumpregs) i |= X86EMU_DUMP_REGS;
-  if(opt.show.dumpints) i |= X86EMU_DUMP_INTS;
-  if(opt.show.dumpio) i |= X86EMU_DUMP_IO;
-  if(opt.show.dumptime) i |= X86EMU_DUMP_TIME;
-
-  if(i) {
-    x86emu_log(emu, "\n; - - - final state\n");
-    x86emu_dump(emu, i);
-    x86emu_log(emu, "; - - -\n");
-  }
-
-  if(opt.verbose >= 2) x86emu_log(emu, "=== emulation log end ===\n");
-
-  x86emu_clear_log(emu, 1);
-
-  return err;
-}
-
-
-int vm_prepare(vm_t *vm)
-{
-  int ok = 0;
-  unsigned u;
-  unsigned char *p1, *p2;
-
-  if(opt.verbose >= 2) lprintf("=== bios setup ===\n");
-
-  if(opt.bios) {
-    unsigned char buf[VBIOS_ROM_SIZE];
-    int fd, i;
-
-    fd = open(opt.bios, O_RDONLY);
-    if(fd == -1) {
-      perror(opt.bios);
-      return ok;
-    }
-    else {
-      memset(buf, 0, sizeof buf);
-      i = read(fd, buf, sizeof buf);
-      close(fd);
-      if(i < 0) {
-        perror(opt.bios);
-        return ok;
-      }
-      else {
-        if(opt.verbose >= 2) lprintf("video bios: read %d bytes from %s\n", i, opt.bios);
-        if(buf[0] != 0x55 || buf[1] != 0xaa || buf[2] == 0) {
-          lprintf("error: no video bios\n");
-          return ok;
-        }
-
-        copy_to_vm(vm->emu, VBIOS_ROM, buf, buf[2] * 0x200, X86EMU_PERM_RX);
-
-        vm_write_word(vm->emu, 0x10*4, opt.bios_entry, X86EMU_PERM_RW);
-        vm_write_word(vm->emu, 0x10*4+2, VBIOS_ROM >> 4, X86EMU_PERM_RW);
-      }
-    }
-  }
-  else {
-    p1 = map_mem(0, 0x1000);
-    if(!p1) {
-      perror("/dev/mem");
-      return ok;
-    }
-
-    copy_to_vm(vm->emu, 0x10*4, p1 + 0x10*4, 4, X86EMU_PERM_RW);
-    copy_to_vm(vm->emu, 0x400, p1 + 0x400, 0x100, X86EMU_PERM_RW);
-
-    munmap(p1, 0x1000);
-
-    p2 = map_mem(VBIOS_ROM, VBIOS_ROM_SIZE);
-    if(!p2 || p2[0] != 0x55 || p2[1] != 0xaa || p2[2] == 0) {
-      if(p2) munmap(p2, VBIOS_ROM_SIZE);
-      lprintf("error: no video bios\n");
-      return ok;
-    }
-
-    copy_to_vm(vm->emu, VBIOS_ROM, p2, p2[2] * 0x200, X86EMU_PERM_RX);
-
-    munmap(p2, VBIOS_ROM_SIZE);
-  }
-
-  if(opt.verbose >= 2) {
-    lprintf("video bios: size 0x%04x\n", x86emu_read_byte(vm->emu, VBIOS_ROM + 2) * 0x200);
-    lprintf("video bios: entry 0x%04x:0x%04x\n",
-      x86emu_read_word(vm->emu, 0x10*4 +  2),
-      x86emu_read_word(vm->emu, 0x10*4)
-    );
-  }
-
-  // video memory
-  vm->video_mem = map_mem(VBIOS_MEM, VBIOS_MEM_SIZE);
-
-  if(vm->video_mem) {
-    x86emu_set_perm(vm->emu, VBIOS_MEM, VBIOS_MEM + VBIOS_MEM_SIZE - 1, X86EMU_PERM_RW);
-    for(u = 0; u < VBIOS_MEM_SIZE; u += X86EMU_PAGE_SIZE) {
-      x86emu_set_page(vm->emu, VBIOS_MEM + u, vm->video_mem + u);
-    }
-  }
-
-  // jmp far 0:0x7c00
-  vm_write_byte(vm->emu, 0xffff0, 0xea, X86EMU_PERM_RX);
-  vm_write_word(vm->emu, 0xffff1, 0x7c00, X86EMU_PERM_RX);
-  vm_write_word(vm->emu, 0xffff3, 0x0000, X86EMU_PERM_RX);
-
-  // int 0x10 ; hlt
-  vm_write_word(vm->emu, 0x7c00, 0x10cd, X86EMU_PERM_RX);
-  vm_write_byte(vm->emu, 0x7c02, 0xf4, X86EMU_PERM_RX);
-
-  // stack & buffer space
-  x86emu_set_perm(vm->emu, VBE_BUF, 0xffff, X86EMU_PERM_RW);
-
-  if(opt.show.regs) vm->emu->log.regs = 1;
-  if(opt.show.code) vm->emu->log.code = 1;
-  if(opt.show.data) vm->emu->log.data = 1;
-  if(opt.show.acc) vm->emu->log.acc = 1;
-  if(opt.show.io) vm->emu->log.io = 1;
-  if(opt.show.ints) vm->emu->log.ints = 1;
-  if(opt.show.tsc) vm->emu->log.tsc = 1;
-
-  if(opt.timeout) vm->emu->timeout = opt.timeout ?: 20;
-
-  ok = 1;
-
-  return ok;
 }
 
 
