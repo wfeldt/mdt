@@ -19,7 +19,12 @@
 
 #define STR_SIZE 128
 
-#define VBIOS_SIZE	0x10000
+#define VBIOS_ROM	0xc0000
+#define VBIOS_ROM_SIZE	0x10000
+
+#define VBIOS_MEM	0xa0000
+#define VBIOS_MEM_SIZE	0x10000
+
 
 #define ADD_RES(w, h, f, i) \
   res[res_cnt].width = w, \
@@ -29,6 +34,7 @@
 
 typedef struct {
   x86emu_t *emu;
+  unsigned char *video_mem;
 } vm_t;
 
 
@@ -411,7 +417,14 @@ int probe_port(vm_t *vm, unsigned port)
 
 int do_int(x86emu_t *emu, u8 num, unsigned type)
 {
-  if((type & 0xff) == INTR_TYPE_FAULT) x86emu_stop(emu);
+  if((type & 0xff) == INTR_TYPE_FAULT) {
+    x86emu_stop(emu);
+
+    return 0;
+  }
+
+  // ignore ints != 0x10
+  if(num != 0x10) return 1;
 
   return 0;
 }
@@ -489,12 +502,13 @@ unsigned vm_run(x86emu_t *emu, double *t)
 int vm_prepare(vm_t *vm)
 {
   int ok = 0;
+  unsigned u;
   unsigned char *p1, *p2;
 
   if(opt.verbose >= 2) lprintf("=== bios setup ===\n");
 
   if(opt.bios) {
-    unsigned char buf[VBIOS_SIZE];
+    unsigned char buf[VBIOS_ROM_SIZE];
     int fd, i;
 
     fd = open(opt.bios, O_RDONLY);
@@ -517,10 +531,10 @@ int vm_prepare(vm_t *vm)
           return ok;
         }
 
-        copy_to_vm(vm, 0xc0000, buf, buf[2] * 0x200, X86EMU_PERM_RX);
+        copy_to_vm(vm, VBIOS_ROM, buf, buf[2] * 0x200, X86EMU_PERM_RX);
 
         vm_write_word(vm, 0x10*4, opt.bios_entry, X86EMU_PERM_RW);
-        vm_write_word(vm, 0x10*4+2, 0xc000, X86EMU_PERM_RW);
+        vm_write_word(vm, 0x10*4+2, VBIOS_ROM >> 4, X86EMU_PERM_RW);
       }
     }
   }
@@ -536,24 +550,34 @@ int vm_prepare(vm_t *vm)
 
     munmap(p1, 0x1000);
 
-    p2 = map_mem(0xc0000, VBIOS_SIZE);
+    p2 = map_mem(VBIOS_ROM, VBIOS_ROM_SIZE);
     if(!p2 || p2[0] != 0x55 || p2[1] != 0xaa || p2[2] == 0) {
-      if(p2) munmap(p2, VBIOS_SIZE);
+      if(p2) munmap(p2, VBIOS_ROM_SIZE);
       lprintf("error: no video bios\n");
       return ok;
     }
 
-    copy_to_vm(vm, 0xc0000, p2, p2[2] * 0x200, X86EMU_PERM_RX);
+    copy_to_vm(vm, VBIOS_ROM, p2, p2[2] * 0x200, X86EMU_PERM_RX);
 
-    munmap(p2, VBIOS_SIZE);
+    munmap(p2, VBIOS_ROM_SIZE);
   }
 
   if(opt.verbose >= 2) {
-    lprintf("video bios: size 0x%04x\n", x86emu_read_byte(vm->emu, 0xc0002) * 0x200);
+    lprintf("video bios: size 0x%04x\n", x86emu_read_byte(vm->emu, VBIOS_ROM + 2) * 0x200);
     lprintf("video bios: entry 0x%04x:0x%04x\n",
       x86emu_read_word(vm->emu, 0x10*4 +  2),
       x86emu_read_word(vm->emu, 0x10*4)
     );
+  }
+
+  // video memory
+  vm->video_mem = map_mem(VBIOS_MEM, VBIOS_MEM_SIZE);
+
+  if(vm->video_mem) {
+    x86emu_set_perm(vm->emu, VBIOS_MEM, VBIOS_MEM + VBIOS_MEM_SIZE - 1, X86EMU_PERM_RW);
+    for(u = 0; u < VBIOS_MEM_SIZE; u += X86EMU_PAGE_SIZE) {
+      x86emu_set_page(vm->emu, VBIOS_MEM + u, vm->video_mem + u);
+    }
   }
 
   // jmp far 0:0x7c00
