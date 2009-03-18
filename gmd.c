@@ -427,7 +427,7 @@ vm_t *vm_new()
   vm->emu->private = vm;
 
   x86emu_set_log(vm->emu, 200000000, flush_log);
-  x86emu_set_intr_func(vm->emu, do_int);
+  x86emu_set_intr_handler(vm->emu, do_int);
 
   return vm;
 }
