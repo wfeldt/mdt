@@ -76,7 +76,6 @@ struct option options[] = {
   { "modes",      0, NULL, 1003 },
   { "mode",       1, NULL, 1004 },
   { "show",       1, NULL, 1005 },
-  { "no-show",    1, NULL, 1006 },
   { "port",       1, NULL, 1007 },
   { "timeout",    1, NULL, 1008 },
   { "bios",       1, NULL, 1009 },
@@ -94,24 +93,8 @@ struct {
   unsigned mode;
   unsigned mode_set:1;
 
-  struct {
-    unsigned code:1;
-    unsigned regs:1;
-    unsigned data:1;
-    unsigned io:1;
-    unsigned ints:1;
-    unsigned acc:1;
-    unsigned rawptable:1;
-    unsigned dump:1;
-    unsigned dumpmem:1;
-    unsigned dumpinvmem:1;
-    unsigned dumpattr:1;
-    unsigned dumpregs:1;
-    unsigned dumpints:1;
-    unsigned dumpio:1;
-    unsigned dumptime:1;
-    unsigned tsc:1;
-  } show;
+  unsigned trace_flags;
+  unsigned dump_flags;
 
   char *bios;
   unsigned bios_entry;
@@ -124,7 +107,7 @@ int main(int argc, char **argv)
 {
   int i, err;
   char *s, *t;
-  unsigned u;
+  unsigned u, tbits, dbits;
   vm_t *vm;
 
   opt.log_file = stdout;
@@ -149,31 +132,52 @@ int main(int argc, char **argv)
         break;
 
       case 1005:
-      case 1006:
         if(opt.verbose < 2) opt.verbose = 2;
-        s = optarg;
-        u = i == 1005 ? 1 : 0;
-        while((t = strsep(&s, ","))) {
-          if(!strcmp(t, "code")) opt.show.code = u;
-          else if(!strcmp(t, "regs")) opt.show.regs = u;
-          else if(!strcmp(t, "data")) opt.show.data = u;
-          else if(!strcmp(t, "io")) opt.show.io = u;
-          else if(!strcmp(t, "ints")) opt.show.ints = u;
-          else if(!strcmp(t, "acc")) opt.show.acc = u;
-          else if(!strcmp(t, "dump")) opt.show.dump = u;
-          else if(!strcmp(t, "dump.mem")) opt.show.dumpmem = u;
-          else if(!strcmp(t, "dump.invmem")) opt.show.dumpinvmem = u;
-          else if(!strcmp(t, "dump.attr")) opt.show.dumpattr = u;
-          else if(!strcmp(t, "dump.regs")) opt.show.dumpregs = u;
-          else if(!strcmp(t, "dump.ints")) opt.show.dumpints = u;
-          else if(!strcmp(t, "dump.io")) opt.show.dumpio = u;
-          else if(!strcmp(t, "dump.time")) opt.show.dumptime = u;
-          else if(!strcmp(t, "tsc")) opt.show.tsc = u;
-          else if(!strcmp(t, "trace")) {
-            opt.show.regs = opt.show.data = opt.show.code =
-            opt.show.io = opt.show.ints = u;
-          }
+
+        for(s = optarg; (t = strsep(&s, ",")); ) {
+          u = 1;
+          tbits = dbits = 0;
+          while(*t == '+' || *t == '-') u = *t++ == '+' ? 1 : 0;
+               if(!strcmp(t, "trace")) tbits = X86EMU_TRACE_DEFAULT;
+          else if(!strcmp(t, "code"))  tbits = X86EMU_TRACE_CODE;
+          else if(!strcmp(t, "regs"))  tbits = X86EMU_TRACE_REGS;
+          else if(!strcmp(t, "data"))  tbits = X86EMU_TRACE_DATA;
+          else if(!strcmp(t, "acc"))   tbits = X86EMU_TRACE_ACC;
+          else if(!strcmp(t, "io"))    tbits = X86EMU_TRACE_IO;
+          else if(!strcmp(t, "ints"))  tbits = X86EMU_TRACE_INTS;
+          else if(!strcmp(t, "time"))  tbits = X86EMU_TRACE_TIME;
+          else if(!strcmp(t, "dump"))         dbits = X86EMU_DUMP_DEFAULT;
+          else if(!strcmp(t, "dump.regs"))    dbits = X86EMU_DUMP_REGS;
+          else if(!strcmp(t, "dump.mem"))     dbits = X86EMU_DUMP_MEM;
+          else if(!strcmp(t, "dump.mem.acc")) dbits = X86EMU_DUMP_ACC_MEM;
+          else if(!strcmp(t, "dump.mem.inv")) dbits = X86EMU_DUMP_INV_MEM;
+          else if(!strcmp(t, "dump.attr"))    dbits = X86EMU_DUMP_ATTR;
+          else if(!strcmp(t, "dump.io"))      dbits = X86EMU_DUMP_IO;
+          else if(!strcmp(t, "dump.ints"))    dbits = X86EMU_DUMP_INTS;
+          else if(!strcmp(t, "dump.time"))    dbits = X86EMU_DUMP_TIME;
           else err = 5;
+          if(err) {
+            fprintf(stderr, "error: invalid flag '%s'\n", t);
+            return 1;
+          }
+          else {
+            if(tbits) {
+              if(u) {
+                opt.trace_flags |= tbits;
+              }
+              else {
+                opt.trace_flags &= ~tbits;
+              }
+            }
+            if(dbits) {
+              if(u) {
+                opt.dump_flags |= dbits;
+              }
+              else {
+                opt.dump_flags &= ~dbits;
+              }
+            }
+          }
         }
         break;
 
@@ -237,13 +241,12 @@ void help()
     "  --timeout SECONDS\n"
     "      Maximum probing time (default: 20s).\n"
     "  --show LIST\n"
-    "      Things to log. LIST is a comma-separated list of code, regs, data,\n"
-    "      io, ints, acc, tsc, dump.mem, dump.invmem, dump.attr, dump.regs,\n"
-    "      dump.io, dump.ints, dump.time.\n"
-    "      Or use trace and dump as shorthands for a useful combination of items\n"
+    "      Things to log. LIST is a comma-separated list of code, regs, data, acc,\n"
+    "      io, ints, time, dump.regs, dump.mem, dump.mem.acc, dump.mem.inv,\n"
+    "      dump.attr, dump.io, dump.ints, dump.time.\n"
+    "      Every item can be prefixed by '-' to turn it off.\n"
+    "      Use trace and dump as shorthands for a useful combination of items\n"
     "      from the above list.\n"
-    "  --no-show LIST\n"
-    "      Things not to log (see --show).\n"
     "  -v, --verbose\n"
     "      Show more log messages. Repeat option to show even more.\n"
     "  --bios BIOS_IMAGE_FILE\n"
@@ -369,12 +372,13 @@ void vm_free(vm_t *vm)
 
 unsigned vm_run(x86emu_t *emu, double *t)
 {
-  int i;
   unsigned err;
 
   if(opt.verbose >= 2) x86emu_log(emu, "=== emulation log ===\n");
 
   *t = get_time();
+
+  x86emu_reset_access_stats(emu);
 
   iopl(3);
   err = x86emu_run(emu, X86EMU_RUN_LOOP | X86EMU_RUN_NO_CODE | X86EMU_RUN_TIMEOUT);
@@ -382,25 +386,9 @@ unsigned vm_run(x86emu_t *emu, double *t)
 
   *t = get_time() - *t;
 
-  i = 0;
-  if(opt.show.dump) i |= -1;
-  if(opt.show.dumpinvmem) {
-    i |= X86EMU_DUMP_INV_MEM;
-    i &= ~X86EMU_DUMP_MEM;
-  }
-  if(opt.show.dumpmem) {
-    i |= X86EMU_DUMP_MEM;
-    i &= ~X86EMU_DUMP_INV_MEM;
-  }
-  if(opt.show.dumpattr) i |= X86EMU_DUMP_ATTR;
-  if(opt.show.dumpregs) i |= X86EMU_DUMP_REGS;
-  if(opt.show.dumpints) i |= X86EMU_DUMP_INTS;
-  if(opt.show.dumpio) i |= X86EMU_DUMP_IO;
-  if(opt.show.dumptime) i |= X86EMU_DUMP_TIME;
-
-  if(i) {
+  if(opt.dump_flags) {
     x86emu_log(emu, "\n; - - - final state\n");
-    x86emu_dump(emu, i);
+    x86emu_dump(emu, opt.dump_flags);
     x86emu_log(emu, "; - - -\n");
   }
 
@@ -505,13 +493,7 @@ int vm_prepare(vm_t *vm)
   // stack & buffer space
   x86emu_set_perm(vm->emu, VBE_BUF, 0xffff, X86EMU_PERM_RW);
 
-  if(opt.show.regs) vm->emu->log.regs = 1;
-  if(opt.show.code) vm->emu->log.code = 1;
-  if(opt.show.data) vm->emu->log.data = 1;
-  if(opt.show.acc) vm->emu->log.acc = 1;
-  if(opt.show.io) vm->emu->log.io = 1;
-  if(opt.show.ints) vm->emu->log.ints = 1;
-  if(opt.show.tsc) vm->emu->log.tsc = 1;
+  vm->emu->log.trace = opt.trace_flags;
 
   if(opt.timeout) vm->emu->timeout = opt.timeout ?: 20;
 
