@@ -481,10 +481,9 @@ int vm_prepare(vm_t *vm)
     }
   }
 
-  // jmp far 0:0x7c00
-  vm_write_byte(vm->emu, 0xffff0, 0xea, X86EMU_PERM_RX);
-  vm_write_word(vm->emu, 0xffff1, 0x7c00, X86EMU_PERM_RX);
-  vm_write_word(vm->emu, 0xffff3, 0x0000, X86EMU_PERM_RX);
+  // start address 0:0x7c00
+  x86emu_set_seg_register(vm->emu, vm->emu->x86.R_CS_SEL, 0);
+  vm->emu->x86.R_EIP = 0x7c00;
 
   // int 0x10 ; hlt
   vm_write_word(vm->emu, 0x7c00, 0x10cd, X86EMU_PERM_RX);
