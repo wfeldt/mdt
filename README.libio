@@ -1,0 +1,19 @@
+libio - a really rudimentary libc
+---------------------------------
+
+libio is useful if you want to write tiny DOS programs (.COM). You can write
+your program as usual in C and link against libio using the provided linker
+script com.ld. But please keep the tight memory restrictions in mind.
+
+It implements just these functions
+
+  - getchar(), printf(), memcpy(), memset() with typical libc semantics
+  - clrsrc() - clear text screen
+  - x86int() - run x86 interrupt
+
+It would have been possible to write this all in C but I happened to have a
+asm-version of printf() around, so I wrote the rest in asm, too.
+
+If you add more, remember that the total available memory (code + data +
+stack) for your program is 64k.
+

@@ -1,0 +1,41 @@
+MDT - Video BIOS monitor detection tool
+---------------------------------------
+
+This is a tiny program that can be run either directly or from DOS and uses
+VESA BIOS functions to read monitor data. The basic purpose is to see
+whether this works correctly.
+
+For convenience, two boot ISOs are provided:
+
+/usr/share/mdt/mdt.iso
+/usr/share/mdt/mdt_dos.iso
+
+In short: use mdt.iso unless it doesn't boot on your machine.
+
+The difference is that mdt.iso boots directly into the test program while
+mdt_dos.iso comes with FreeDOS running the test program as a small .COM
+file.
+
+mdt.iso is smaller and boots faster, but it _might_ be (some BIOSes are a
+bit broken) that it does not boot on some machines. In that case try
+mdt_dos.iso. Also, if you feel like debugging something, the DOS variant is
+probably better.
+
+There is no point in trying both. The programs are really identical.
+
+
+Usage
+-----
+
+Burn the ISO to a CD and boot the CD.
+
+The program will come up and ask you for the display port (your video output
+connector) to probe. Typically ports 0, 1, or 2 are used (e.g. port 2 = DVI).
+
+Note (seen all this with real BIOSes):
+  - It might be that you don't get a result if you probe a port the first
+    time - be persistent. :-)
+  - The BIOS may crash if the port number is too high.
+  - Higher port numbers may duplicate lower ports (e.g. your monitor shows
+    up at ports 0 and 2.
+

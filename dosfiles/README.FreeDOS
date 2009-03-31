@@ -1,0 +1,8 @@
+kernel.sys		FreeDOS kernel
+command.com		FreeDOS command line interpreter
+freedos_boot.fat12	FreeDOS boot block for FAT12
+freedos_boot.fat16	FreeDOS boot block for FAT16
+
+FreeDOS files have been taken from the FreeDOS binary distribution that
+comes with dosemu-1.4.0.
+

@@ -1,0 +1,190 @@
+#! /usr/bin/perl
+
+#
+# hdimage 1.0
+#
+# Create disk image with partition table and a single partition.
+#
+# Copyright (c) 2008 Steffen Winterfeldt
+#
+# For details see file COPYING.
+#
+
+
+use integer;
+
+use Getopt::Long;
+
+sub usage;
+sub new_tmp_file;
+sub cleanup;
+
+END { cleanup }     
+$SIG{INT} = \&cleanup;
+$SIG{TERM} = \&cleanup;
+
+usage 0 if !@ARGV;
+
+GetOptions(
+  'help'         => sub { usage 0 },
+  'mbr=s'        => \$opt_mbr,
+  'type=o'       => \$opt_type,
+  'size=o'       => \$opt_size,
+  'chs=o{3}'     => \@opt_chs,
+  'mkfs=s'       => \$opt_mkfs,
+  'label=s'      => \$opt_label,
+  'boot-block=s' => \$opt_boot_block,
+) || usage 1;
+
+usage 1 if @ARGV != 1;
+
+$file = shift;
+
+$opt_chs[1] = 255 if $opt_chs[1] < 1 || $opt_chs[1] > 255;
+$opt_chs[2] = 63 if $opt_chs[2] < 1 || $opt_chs[2] > 63;
+
+if(!$opt_chs[0] && $opt_size) {
+  $opt_chs[0] = ($opt_size + $opt_chs[1] * $opt_chs[2]) / $opt_chs[1] / $opt_chs[2];
+  $opt_size = $opt_chs[0] * $opt_chs[1] * $opt_chs[2];
+}
+elsif($opt_chs[0] && !$opt_size) {
+  $opt_size = $opt_chs[0] * $opt_chs[1] * $opt_chs[2];
+}
+
+die "sorry, no disk size\n" unless $opt_size;
+
+print "size = $opt_size sectors, chs = $opt_chs[0]/$opt_chs[1]/$opt_chs[2]\n";
+
+if($opt_mbr) {
+  open F, $opt_mbr;
+  sysread F, $mboot, 446;
+  close F;
+
+  if(length($mboot) != 446) {
+    print "warning: no MBR found, please install package 'master-boot-code'\n";
+  }
+}
+
+$mbr = pack (
+  "Z446CCvCCCCVVZ48v",
+  $mboot,                       # boot code, if any
+  0x80,                         # bootflag
+  $opt_chs[1] > 1 ? 1 : 0,      # head 1st
+  $opt_chs[1] > 1 ? 1 : 0x101,  # cyl/sector 1st
+  $opt_type,                    # partition type
+  $opt_chs[1] - 1,              # head last
+  ((($opt_chs[0] - 1) >> 8) << 6) + $opt_chs[2],       # cyl/sector last, byte 0
+  ($opt_chs[0] - 1) & 0xff,     # cyl/sector last, byte 1
+  $opt_chs[2],                  # partition offset
+  $opt_size - $opt_chs[2],      # partition size
+  "", 0xaa55
+);
+
+open F, ">$file";
+syswrite F, $mbr;
+sysseek F, $opt_chs[2] * 512 - 1, 0;
+syswrite F, "\x00", 1;
+close F;
+
+if($opt_mkfs) {
+  $f = new_tmp_file;
+  open F, ">$f";
+  seek F, ($opt_size - $opt_chs[2]) * 512 - 1, 0;
+  syswrite F, "\x00", 1;
+  close F;
+  if($opt_mkfs eq 'fat') {
+    $x = " -n '$opt_label'" if $opt_label ne "";
+    system "mkfs.vfat -h $opt_chs[2]$x $f >/dev/null";
+
+    # mkfs.vfat is a bit stupid; fix FAT superblock
+    open F, "+<$f";
+    sysseek F, 0x18, 0;
+    syswrite F, pack("vv", $opt_chs[2], $opt_chs[1]);
+    sysseek F, 0x24, 0;
+    syswrite F, "\xff";
+    close F;
+
+    if($opt_boot_block) {
+      open F, $opt_boot_block;
+      sysread F, $boot_block, 512;
+      close F;
+      if(length($boot_block) == 512) {
+        open F, "+<$f";
+        syswrite F, $boot_block, 11;
+        sysseek F, 0x3e, 0;
+        syswrite F, substr($boot_block, 0x3e);
+        close F;
+      }
+      else {
+        print "warning: $opt_boot_block: no boot block\n";
+      }
+    }
+  }
+  elsif($opt_mkfs eq 'ext2') {
+    $x = " -L '$opt_label'" if $opt_label ne "";
+    system "mkfs.ext2 -q -m 0 -F$x $f";
+    system "tune2fs -c 0 -i 0 $f >/dev/null 2>&1";
+  }
+  else {
+    print "warning: unsupported file system $opt_mkfs\n";
+  }
+  system "cat $f >>$file";
+}
+else {
+  open F, "+<$file";
+  sysseek F, $opt_size * 512 - 1, 0;
+  syswrite F, "\x00", 1;
+  close F;
+}
+
+
+sub usage
+{
+  print <<"  usage";
+Usage: hdimage [options] image_file
+Create disk image.
+
+Options:
+
+  --mbr FILE                    Add bootloader to MBR using code from FILE.
+  --boot-block FILE             Make FAT partition bootable using boot code from FILE.
+  --type PARTITIONTYPE          Set partition type.
+  --mkfs FS                     Create file system FS (FS: fat, ext2).
+  --size SECTORS                Disk size in sectors. Will be rounded up to full cylinders.
+  --chs CYLINDERS HEADS SECTORS
+                                Disk geometry.
+
+  usage
+
+  exit shift;
+}
+
+
+sub new_tmp_file
+{
+  local $_;
+
+  chomp ($_ = `mktemp /tmp/hdimage.XXXXXXXXXX`);
+  die "error: mktemp failed\n" if $?;
+
+  push @tmp_files, $_;
+
+  return $_;
+}
+
+
+sub cleanup
+{
+  local $_;
+
+  for (@tmp_files) {
+    next unless defined $_;
+    next if defined($_[0]) && $_[0] ne $_;
+    system "rm -rf $_" if -d;
+    unlink;
+    $_ = undef if defined $_[0];
+  }
+
+  undef @tmp_files unless defined $_[0];
+}
+
