@@ -31,7 +31,7 @@ int main()
 
   clrscr();
 
-  printf("Video BIOS monitor detection tool V1.0.\n\n");
+  printf("Video BIOS monitor detection tool v1.1.\n\n");
 
   do {
     printf("Select display port to check (0-7) or ESC to abort: ");
