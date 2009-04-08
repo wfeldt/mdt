@@ -1,6 +1,6 @@
 CC          = gcc
 CFLAGS      = -g -O2 -Wall
-CFLAGS_BARE = -O2 -Wall -Wno-pointer-sign -fomit-frame-pointer \
+CFLAGS_BARE = -O2 -Wall -Wno-pointer-sign -fomit-frame-pointer -m32 \
               -fno-align-functions -fno-align-labels -fno-align-jumps -fno-align-loops \
               -fno-builtin -nostdinc -I . 
 ASMFLAGS    = -O99 -felf
