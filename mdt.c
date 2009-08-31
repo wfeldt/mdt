@@ -764,7 +764,7 @@ void probe_all(vm_t *vm)
 
   for(port = 0; port < 4; port++) {
     for(cnt = 0; cnt < 2 && get_time() <= timeout; cnt++) {
-      if(!opt.force) {
+      if(!opt.force && cnt == 0) {
         emu = x86emu_done(emu);
         emu = x86emu_clone(vm->emu);
 
