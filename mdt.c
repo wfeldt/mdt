@@ -244,6 +244,8 @@ void help()
     "Options:\n"
     "  --port PORT_NUMBER\n"
     "      Display port number to use, typically 0 .. 3.\n"
+    "  -f, --force\n"
+    "      Proceed even if ports report no DDC capability.\n"
     "  --timeout SECONDS\n"
     "      Maximum probing time (default: 20s).\n"
     "  --show LIST\n"
