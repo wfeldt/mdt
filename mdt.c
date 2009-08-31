@@ -74,6 +74,7 @@ struct option options[] = {
   { "help",       0, NULL, 'h'  },
   { "verbose",    0, NULL, 'v'  },
   { "modes",      0, NULL, 1003 },
+  { "force",      0, NULL, 'f'  },
   { "mode",       1, NULL, 1004 },
   { "show",       1, NULL, 1005 },
   { "port",       1, NULL, 1007 },
@@ -87,6 +88,7 @@ struct {
   unsigned port;
   unsigned port_set:1;
   unsigned verbose;
+  unsigned force:1;
   unsigned timeout;
 
   unsigned all_modes:1;
@@ -114,12 +116,16 @@ int main(int argc, char **argv)
 
   opterr = 0;
 
-  while((i = getopt_long(argc, argv, "hv", options, NULL)) != -1) {
+  while((i = getopt_long(argc, argv, "fhv", options, NULL)) != -1) {
     err = 0;
 
     switch(i) {
       case 'v':
         opt.verbose++;
+        break;
+
+      case 'f':
+        opt.force = 1;
         break;
 
       case 1003:
@@ -758,6 +764,43 @@ void probe_all(vm_t *vm)
 
   for(port = 0; port < 4; port++) {
     for(cnt = 0; cnt < 2 && get_time() <= timeout; cnt++) {
+      if(!opt.force) {
+        emu = x86emu_done(emu);
+        emu = x86emu_clone(vm->emu);
+
+        emu->x86.R_EAX = 0x4f15;
+        emu->x86.R_EBX = 0;
+        emu->x86.R_ECX = port;
+        emu->x86.R_EDX = 0;
+        emu->x86.R_EDI = 0;
+        emu->x86.R_ES = 0;
+
+        err = vm_run(emu, &d);
+
+        if(opt.verbose >= 2) lprintf("=== port %u, try %u: %s (time %.3fs, eax 0x%x, err = 0x%x)\n",
+          port,
+          cnt,
+          emu->x86.R_AX == 0x4f ? "ok" : "failed",
+          d,
+          emu->x86.R_EAX,
+          err
+        );
+
+        if(err || emu->x86.R_AX != 0x4f) break;
+
+        if(opt.verbose >= 1) lprintf("=== port %u, try %u: bh = %d, bl = 0x%02x\n",
+          port,
+          cnt,
+          emu->x86.R_BH,
+          emu->x86.R_BL
+        );
+
+        if(!(emu->x86.R_BL & 3)) {
+          err = -1;
+          break;
+        }
+      }
+
       emu = x86emu_done(emu);
       emu = x86emu_clone(vm->emu);
 
@@ -828,23 +871,60 @@ int probe_port(vm_t *vm, unsigned port)
 
   if(opt.verbose >= 1) lprintf("=== port %u: running bios\n", port);
 
-  emu = x86emu_clone(vm->emu);
+  if(!opt.force) {
+    emu = x86emu_clone(vm->emu);
 
-  emu->x86.R_EAX = 0x4f15;
-  emu->x86.R_EBX = 1;
-  emu->x86.R_ECX = port;
-  emu->x86.R_EDX = 0;
-  emu->x86.R_EDI = VBE_BUF;
+    emu->x86.R_EAX = 0x4f15;
+    emu->x86.R_EBX = 0;
+    emu->x86.R_ECX = port;
+    emu->x86.R_EDX = 0;
+    emu->x86.R_EDI = 0;
+    emu->x86.R_ES = 0;
 
-  err = vm_run(emu, &d);
+    err = vm_run(emu, &d);
 
-  if(opt.verbose >= 1) lprintf("=== port %u: %s (time %.3fs, eax 0x%x, err = 0x%x)\n",
-    port,
-    emu->x86.R_AX == 0x4f ? "ok" : "failed",
-    d,
-    emu->x86.R_EAX,
-    err
-  );
+    if(opt.verbose >= 1) lprintf("=== port %u: %s (time %.3fs, eax 0x%x, err = 0x%x)\n",
+      port,
+      emu->x86.R_AX == 0x4f ? "ok" : "failed",
+      d,
+      emu->x86.R_EAX,
+      err
+    );
+
+    if(emu->x86.R_AX != 0x4f) err = -1;
+
+    if(!err) {
+      if(opt.verbose >= 1) lprintf("=== port %u: bh = %d, bl = 0x%02x\n",
+        port,
+        emu->x86.R_BH,
+        emu->x86.R_BL
+      );
+
+      if(!(emu->x86.R_BL & 3)) err = -1;
+    }
+
+    emu = x86emu_done(emu);
+  }
+
+  if(!err) {
+    emu = x86emu_clone(vm->emu);
+
+    emu->x86.R_EAX = 0x4f15;
+    emu->x86.R_EBX = 1;
+    emu->x86.R_ECX = port;
+    emu->x86.R_EDX = 0;
+    emu->x86.R_EDI = VBE_BUF;
+
+    err = vm_run(emu, &d);
+
+    if(opt.verbose >= 1) lprintf("=== port %u: %s (time %.3fs, eax 0x%x, err = 0x%x)\n",
+      port,
+      emu->x86.R_AX == 0x4f ? "ok" : "failed",
+      d,
+      emu->x86.R_EAX,
+      err
+    );
+  }
 
   for(i = 0; i < 0x80; i++) edid[i] = x86emu_read_byte(emu, VBE_BUF + i);
 
