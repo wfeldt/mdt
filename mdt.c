@@ -766,7 +766,7 @@ void probe_all(vm_t *vm)
 
   for(port = 0; port < 4; port++) {
     for(cnt = 0; cnt < 2 && get_time() <= timeout; cnt++) {
-      if(!opt.force && cnt == 0) {
+      if(!opt.force) {
         emu = x86emu_done(emu);
         emu = x86emu_clone(vm->emu);
 
@@ -788,7 +788,7 @@ void probe_all(vm_t *vm)
           err
         );
 
-        if(err || emu->x86.R_AX != 0x4f) break;
+        if(err || emu->x86.R_AX != 0x4f) continue;
 
         if(opt.verbose >= 1) lprintf("=== port %u, try %u: bh = %d, bl = 0x%02x\n",
           port,
@@ -799,7 +799,7 @@ void probe_all(vm_t *vm)
 
         if(!(emu->x86.R_BL & 3)) {
           err = -1;
-          break;
+          continue;
         }
       }
 
