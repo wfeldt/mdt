@@ -1,0 +1,5 @@
+31/8/2009:	v1.2
+	- check for ddc capabilities before issuing a ddc call (suggested by Anssi Hannula)
+
+8/8/2009:	v1.1
+	- added mdt tool
