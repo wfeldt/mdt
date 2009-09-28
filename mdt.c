@@ -496,6 +496,52 @@ int vm_prepare(vm_t *vm)
   x86emu_set_seg_register(vm->emu, vm->emu->x86.R_CS_SEL, 0);
   vm->emu->x86.R_EIP = 0x7c00;
 
+#if 0
+
+#define p(a, b) vm_write_byte(vm->emu, a, b, X86EMU_PERM_RX)
+
+  // push 0xb800
+  p(0x7c00, 0x68);
+  p(0x7c01, 0x00);
+  p(0x7c02, 0xb8);
+
+  // pop gs
+  p(0x7c03, 0x0f);
+  p(0x7c04, 0xa9);
+
+  // mov ebp,[gs:0]
+  p(0x7c05, 0x65);
+  p(0x7c06, 0x66);
+  p(0x7c07, 0x8b);
+  p(0x7c08, 0x2e);
+  p(0x7c09, 0x00);
+  p(0x7c0a, 0x00);
+
+  // mov [gs:0],0x41424344
+  p(0x7c0b, 0x65);
+  p(0x7c0c, 0x66);
+  p(0x7c0d, 0xc7);
+  p(0x7c0e, 0x06);
+  p(0x7c0f, 0x00);
+  p(0x7c10, 0x00);
+  p(0x7c11, 0x44);
+  p(0x7c12, 0x43);
+  p(0x7c13, 0x42);
+  p(0x7c14, 0x41);
+
+  // mov ebp,[gs:0]
+  p(0x7c15, 0x65);
+  p(0x7c16, 0x66);
+  p(0x7c17, 0x8b);
+  p(0x7c18, 0x2e);
+  p(0x7c19, 0x00);
+  p(0x7c1a, 0x00);
+
+  // hlt
+  vm_write_byte(vm->emu, 0x7c1b, 0xf4, X86EMU_PERM_RX);
+
+#endif
+
   // int 0x10 ; hlt
   vm_write_word(vm->emu, 0x7c00, 0x10cd, X86EMU_PERM_RX);
   vm_write_byte(vm->emu, 0x7c02, 0xf4, X86EMU_PERM_RX);
@@ -539,7 +585,7 @@ void *map_mem(unsigned start, unsigned size, int rw)
 
   if(fd == -1) return NULL;
 
-  p = mmap(NULL, size, rw ? PROT_READ | PROT_WRITE : PROT_READ, MAP_PRIVATE, fd, start);
+  p = mmap(NULL, size, rw ? PROT_READ | PROT_WRITE : PROT_READ, MAP_SHARED, fd, start);
 
   if(p == MAP_FAILED) {
     lprintf("error: [0x%x, %u]: mmap failed: %s\n", start, size, strerror(errno));

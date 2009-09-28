@@ -1,3 +1,6 @@
+28/9/2009:	v1.4
+	- fix video memory mapping
+
 22/9/2009:	v1.3
 	- map video memory writable
 	- fix memory leak
