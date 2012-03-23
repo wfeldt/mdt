@@ -1,3 +1,7 @@
+23/3/2012:	v1.6
+	- add option to map also system bios
+	- select int 0x10, 0x6d or 0x42 whichever might work best
+
 3/8/2010:	v1.5
 	- also map interrupt 0x6d
 
