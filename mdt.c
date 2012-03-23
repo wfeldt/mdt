@@ -22,6 +22,9 @@
 #define VBIOS_ROM	0xc0000
 #define VBIOS_ROM_SIZE	0x10000
 
+#define SBIOS_ROM	0xf0000
+#define SBIOS_ROM_SIZE	0x10000
+
 #define VBIOS_MEM	0xa0000
 #define VBIOS_MEM_SIZE	0x10000
 
@@ -81,6 +84,8 @@ struct option options[] = {
   { "timeout",    1, NULL, 1008 },
   { "bios",       1, NULL, 1009 },
   { "bios-entry", 1, NULL, 1010 },
+  { "bios-map-all", 0, NULL, 1011 },
+  { "bios-int",   1, NULL, 1012 },
   { }
 };
 
@@ -100,6 +105,8 @@ struct {
 
   char *bios;
   unsigned bios_entry;
+  unsigned bios_map_all:1;
+  unsigned bios_int;
 
   FILE *log_file;
 } opt;
@@ -204,6 +211,14 @@ int main(int argc, char **argv)
         opt.bios_entry = strtoul(optarg, NULL, 0);
         break;
 
+      case 1011:
+        opt.bios_map_all = 1;
+        break;
+
+      case 1012:
+        opt.bios_int = strtoul(optarg, NULL, 0);
+        break;
+
       default:
         help();
         return i == 'h' ? 0 : 1;
@@ -264,6 +279,10 @@ void help()
     "      Use alternative Video BIOS (Don't try this at home!).\n"
     "  --bios-entry START_ADDRESS\n"
     "      In combination with --bios: start address for Video BIOS.\n"
+    "  --bios-map-all\n"
+    "      Map Video BIOS _and_ System BIOS.\n"
+    "  --bios-int N\n"
+    "      Set Video BIOS interrupt to use (0: default, 1: 0x10, 2: 0x42, 3: 0x6d).\n"
     "  --modes\n"
     "      Show video mode list.\n"
     "  --mode MODE_NUMBER\n"
@@ -350,8 +369,8 @@ int do_int(x86emu_t *emu, u8 num, unsigned type)
     return 0;
   }
 
-  // ignore ints != (0x10 or 0x6d)
-  if(num != 0x10 && num != 0x6d) return 1;
+  // ignore ints != (0x10 or 0x42 or 0x6d)
+  if(num != 0x10 && num != 0x42 && num != 0x6d) return 1;
 
   return 0;
 }
@@ -458,6 +477,7 @@ int vm_prepare(vm_t *vm)
     }
 
     copy_to_vm(vm->emu, 0x10*4, p1 + 0x10*4, 4, X86EMU_PERM_RW);
+    copy_to_vm(vm->emu, 0x42*4, p1 + 0x42*4, 4, X86EMU_PERM_RW);
     copy_to_vm(vm->emu, 0x6d*4, p1 + 0x6d*4, 4, X86EMU_PERM_RW);	// original int 0x10
     copy_to_vm(vm->emu, 0x400, p1 + 0x400, 0x100, X86EMU_PERM_RW);
 
@@ -470,17 +490,36 @@ int vm_prepare(vm_t *vm)
       return ok;
     }
 
-    copy_to_vm(vm->emu, VBIOS_ROM, p2, p2[2] * 0x200, X86EMU_PERM_RX);
+    copy_to_vm(vm->emu, VBIOS_ROM, p2, opt.bios_map_all ? VBIOS_ROM_SIZE : p2[2] * 0x200, X86EMU_PERM_RX);
 
     munmap(p2, VBIOS_ROM_SIZE);
+
+    if(opt.bios_map_all) {
+      p2 = map_mem(SBIOS_ROM, SBIOS_ROM_SIZE, 0);
+      copy_to_vm(vm->emu, SBIOS_ROM, p2, SBIOS_ROM_SIZE, X86EMU_PERM_RX);
+      munmap(p2, SBIOS_ROM_SIZE);
+    }
   }
 
   if(opt.verbose >= 2) {
-    lprintf("video bios: size 0x%04x\n", x86emu_read_byte(vm->emu, VBIOS_ROM + 2) * 0x200);
-    lprintf("video bios: entry 0x%04x:0x%04x\n",
+    lprintf("video bios: seg 0x%04x, size 0x%04x\n",
+      VBIOS_ROM >> 4, x86emu_read_byte(vm->emu, VBIOS_ROM + 2) * 0x200
+    );
+    lprintf("video bios (0x10): entry 0x%04x:0x%04x\n",
       x86emu_read_word(vm->emu, 0x10*4 +  2),
       x86emu_read_word(vm->emu, 0x10*4)
     );
+    lprintf("video bios (0x42): entry 0x%04x:0x%04x\n",
+      x86emu_read_word(vm->emu, 0x42*4 +  2),
+      x86emu_read_word(vm->emu, 0x42*4)
+    );
+    lprintf("video bios (0x6d): entry 0x%04x:0x%04x\n",
+      x86emu_read_word(vm->emu, 0x6d*4 +  2),
+      x86emu_read_word(vm->emu, 0x6d*4)
+    );
+    if(opt.bios_map_all) {
+      lprintf("system bios: seg 0x%04x, size 0x%04x\n", SBIOS_ROM >> 4, SBIOS_ROM_SIZE);
+    }
   }
 
   // video memory
@@ -543,8 +582,40 @@ int vm_prepare(vm_t *vm)
 
 #endif
 
+#define ENTRY_OK(a) x86emu_read_byte_noperm(vm->emu, (x86emu_read_word(vm->emu, (a)*4 + 2) << 4) + x86emu_read_word(vm->emu, (a)*4))
+
+  switch(opt.bios_int) {
+    case 1:
+      u = 0x10;
+      break;
+
+    case 2:
+      u = 0x42;
+      break;
+
+    case 3:
+      u = 0x6d;
+      break;
+
+    default:
+      u = 0x10;
+
+      if(ENTRY_OK(0x10)) {
+        u = 0x10;
+      }
+      else if(ENTRY_OK(0x6d)) {
+        u = 0x6d;
+      }
+      else if(ENTRY_OK(0x42)) {
+        u = 0x42;
+      }
+  }
+
+  lprintf("video bios: using int 0x%02x\n", u);
+
   // int 0x10 ; hlt
-  vm_write_word(vm->emu, 0x7c00, 0x10cd, X86EMU_PERM_RX);
+  vm_write_byte(vm->emu, 0x7c00, 0xcd, X86EMU_PERM_RX);
+  vm_write_byte(vm->emu, 0x7c01,    u, X86EMU_PERM_RX);
   vm_write_byte(vm->emu, 0x7c02, 0xf4, X86EMU_PERM_RX);
 
   // stack & buffer space
@@ -765,11 +836,9 @@ void list_modes(vm_t *vm, unsigned mode)
 {
   x86emu_t *emu = NULL;
   int err = 0;
-  double d, timeout;
+  double d;
 
   if(opt.verbose >= 1) lprintf("=== running bios\n");
-
-  timeout = get_time() + (opt.timeout ?: 20);
 
   emu = x86emu_clone(vm->emu);
 
