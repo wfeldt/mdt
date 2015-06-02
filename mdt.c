@@ -39,6 +39,7 @@
 typedef struct {
   x86emu_t *emu;
   unsigned char *video_mem;
+  x86emu_memio_handler_t old_memio;
 } vm_t;
 
 
@@ -86,6 +87,7 @@ struct option options[] = {
   { "bios-entry", 1, NULL, 1010 },
   { "bios-map-all", 0, NULL, 1011 },
   { "bios-int",   1, NULL, 1012 },
+  { "no-io",      0, NULL, 1013 },
   { }
 };
 
@@ -95,6 +97,7 @@ struct {
   unsigned verbose;
   unsigned force:1;
   unsigned timeout;
+  unsigned no_io:1;
 
   unsigned all_modes:1;
   unsigned mode;
@@ -219,6 +222,10 @@ int main(int argc, char **argv)
         opt.bios_int = strtoul(optarg, NULL, 0);
         break;
 
+      case 1013:
+        opt.no_io = 1;
+        break;
+
       default:
         help();
         return i == 'h' ? 0 : 1;
@@ -264,6 +271,8 @@ void help()
     "      Display port number to use, typically 0 .. 3.\n"
     "  -f, --force\n"
     "      Proceed even if ports report no DDC capability.\n"
+    "  --no-io\n"
+    "      Don't do any real i/o accesses.\n"
     "  --timeout SECONDS\n"
     "      Maximum probing time (default: 20s).\n"
     "  --show LIST\n"
@@ -430,6 +439,24 @@ unsigned vm_run(x86emu_t *emu, double *t)
 }
 
 
+unsigned new_memio(x86emu_t *emu, u32 addr, u32 *val, unsigned type)
+{
+  vm_t *vm = emu->private;
+  unsigned err = 0;
+
+  if((type & ~0xff) == X86EMU_MEMIO_I) {
+    *val = 0;
+  }
+  else if((type & ~0xff) == X86EMU_MEMIO_O) {
+  }
+  else {
+    err = vm->old_memio(emu, addr, val, type);
+  }
+
+  return err;
+}
+
+
 int vm_prepare(vm_t *vm)
 {
   int ok = 0;
@@ -535,6 +562,9 @@ int vm_prepare(vm_t *vm)
   // start address 0:0x7c00
   x86emu_set_seg_register(vm->emu, vm->emu->x86.R_CS_SEL, 0);
   vm->emu->x86.R_EIP = 0x7c00;
+
+
+  if(opt.no_io) vm->old_memio = x86emu_set_memio_handler(vm->emu, new_memio);
 
 #if 0
 
