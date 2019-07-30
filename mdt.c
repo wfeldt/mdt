@@ -549,13 +549,22 @@ int vm_prepare(vm_t *vm)
     }
   }
 
-  // video memory
-  vm->video_mem = map_mem(VBIOS_MEM, VBIOS_MEM_SIZE, 1);
+  if(opt.no_io) {
+    unsigned addr;
 
-  if(vm->video_mem) {
-    x86emu_set_perm(vm->emu, VBIOS_MEM, VBIOS_MEM + VBIOS_MEM_SIZE - 1, X86EMU_PERM_RW);
-    for(u = 0; u < VBIOS_MEM_SIZE; u += X86EMU_PAGE_SIZE) {
-      x86emu_set_page(vm->emu, VBIOS_MEM + u, vm->video_mem + u);
+    for(addr = VBIOS_MEM; addr < VBIOS_MEM + VBIOS_MEM_SIZE; addr++) {
+      vm_write_byte(vm->emu, addr, 0, X86EMU_PERM_RW);
+    }
+  }
+  else {
+    // video memory
+    vm->video_mem = map_mem(VBIOS_MEM, VBIOS_MEM_SIZE, 1);
+
+    if(vm->video_mem) {
+      x86emu_set_perm(vm->emu, VBIOS_MEM, VBIOS_MEM + VBIOS_MEM_SIZE - 1, X86EMU_PERM_RW);
+      for(u = 0; u < VBIOS_MEM_SIZE; u += X86EMU_PAGE_SIZE) {
+        x86emu_set_page(vm->emu, VBIOS_MEM + u, vm->video_mem + u);
+      }
     }
   }
 
