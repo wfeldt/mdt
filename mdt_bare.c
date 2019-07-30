@@ -23,7 +23,8 @@ char *eisa_vendor(unsigned v);
 char *canon_str(char *s, int len);
 int chk_edid_info(unsigned char *edid);
 unsigned probe_ddc(int port, unsigned char *edid);
-
+void get_vbe_info();
+void print_vbe_info(unsigned char *vbe_buf);
 
 int main()
 {
@@ -31,14 +32,17 @@ int main()
 
   clrscr();
 
-  printf("Video BIOS monitor detection tool v1.1.\n\n");
+  printf("Video BIOS monitor detection tool v1.7.\n\n");
 
   do {
-    printf("Select display port to check (0-7) or ESC to abort: ");
+    printf("select display port to check (0-7)\n");
+    printf("or list video modes (L)\n");
+    printf("or ESC to abort: ");
     key = getchar();
     if(key >= ' ') printf("%c\n", key);
 
     if(key >= '0' && key < '8') print_edid(key - '0');
+    if(key == 'L' || key == 'l') get_vbe_info();
 
   } while(key != 0x1b && key != 3 && key != 4 && key != 'q' && key != 0x11);
 
@@ -395,3 +399,208 @@ unsigned probe_ddc(int port, unsigned char *edid)
   return r.eax;
 }
 
+
+void get_vbe_info()
+{
+  unsigned char buf[1024];
+  x86regs_t r = { };
+
+  memset(buf, 0, sizeof buf);
+
+  r.eax = 0x4f00;
+  r.ebx = 0;
+  r.ecx = 0;
+  r.edx = 0;
+  r.edi = (unsigned) buf;
+
+  buf[0] = 'V';
+  buf[1] = 'B';
+  buf[2] = 'E';
+  buf[3] = '2';
+
+  x86int(0x10, &r);
+
+  // failed
+  if(r.eax != 0x004f) {
+    printf("VBE call failed\n");
+    return;
+  }
+
+  printf("buf = %p\n", buf);
+
+  print_vbe_info(buf);
+}
+
+unsigned read_word(unsigned char *buf)
+{
+  return buf[0] + (buf[1] << 8);
+}
+
+unsigned read_segofs16(unsigned char *buf)
+{
+  return read_word(buf) + (read_word(buf + 2) << 4);
+}
+
+void print_vbe_info(unsigned char *vbe_buf)
+{
+  unsigned mode = 0;
+
+  unsigned char buf2[0x100];
+  unsigned u, ml;
+  unsigned modelist[0x100];
+  unsigned modes, number;
+  int err;
+  double d;
+  char s[64];
+  unsigned version, oem_version, memory, attributes, width, height, bytes_p_line;
+  unsigned win_A_start, win_B_start, win_A_attr, win_B_attr, win_gran, win_size;
+  unsigned bpp, res_bpp, fb_start, pixel_clock;
+
+  version = vbe_buf[0x04];
+  oem_version = vbe_buf[0x14];
+  memory = vbe_buf[0x12] << 16;
+
+
+  if(!mode) {
+    printf(
+      "version = %u.%u, oem version = %u.%u\n",
+      version >> 8, version & 0xff, oem_version >> 8, oem_version & 0xff
+    );
+
+    printf("memory = %uk\n", memory >> 10);
+
+    buf2[sizeof buf2 - 1] = 0;
+
+    u = read_segofs16(vbe_buf + 0x06);
+    memcpy(buf2, (void *) u, sizeof buf2 - 1);
+    printf("oem name [0x%05x] = \"%s\"\n", u, buf2);
+
+    u = read_segofs16(vbe_buf + 0x16);
+    memcpy(buf2, (void *) u, sizeof buf2 - 1);
+    printf("vendor name [0x%05x] = \"%s\"\n", u, buf2);
+
+    u = read_segofs16(vbe_buf + 0x1a);
+    memcpy(buf2, (void *) u, sizeof buf2 - 1);
+    printf("product name [0x%05x] = \"%s\"\n", u, buf2);
+
+    u = read_segofs16(vbe_buf + 0x1e);
+    memcpy(buf2, (void *) u, sizeof buf2 - 1);
+    printf("product revision [0x%05x] = \"%s\"\n", u, buf2);
+  }
+
+  ml = read_segofs16(vbe_buf + 0x0e);
+
+  printf("ml = %d\n", ml);
+
+#if 0
+
+  for(modes = 0; modes < sizeof modelist / sizeof *modelist; ) {
+    u = x86emu_read_word(emu, ml + 2 * modes);
+    if(u == 0xffff) break;
+    modelist[modes++] = u;
+  }
+
+  if(!mode) printf("%u video modes:\n", modes);
+
+  emu = NULL;
+
+  for(u = 0; u < modes; u++) {
+    number = modelist[u];
+    if(mode && number != mode) continue;
+
+    x86emu_done(emu);
+    emu = x86emu_clone(vm->emu);
+
+    emu->x86.R_EAX = 0x4f01;
+    emu->x86.R_EBX = 0;
+    emu->x86.R_ECX = number;
+    emu->x86.R_EDX = 0;
+    emu->x86.R_EDI = VBE_BUF;
+
+    err = vm_run(emu, &d);
+
+    if(opt.verbose >= 1) printf("=== vbe get mode info (0x%04x): %s (time %.3fs, eax 0x%x, err = 0x%x)\n",
+      number,
+      emu->x86.R_AX == 0x4f ? "ok" : "failed",
+      d,
+      emu->x86.R_EAX,
+      err
+    );
+
+    if(err || emu->x86.R_AX != 0x4f) {
+      printf("  0x%04x: no mode info\n", number);
+      continue;
+    }
+
+    attributes = x86emu_read_word(emu, VBE_BUF + 0x00);
+
+    width = x86emu_read_word(emu, VBE_BUF + 0x12);
+    height = x86emu_read_word(emu, VBE_BUF + 0x14);
+    bytes_p_line = x86emu_read_word(emu, VBE_BUF + 0x10);
+
+    win_A_start = x86emu_read_word(emu, VBE_BUF + 0x08) << 4;
+    win_B_start = x86emu_read_word(emu, VBE_BUF + 0x0a) << 4;
+
+    win_A_attr = x86emu_read_byte(emu, VBE_BUF + 0x02);
+    win_B_attr = x86emu_read_byte(emu, VBE_BUF + 0x03);
+
+    win_gran = x86emu_read_word(emu, VBE_BUF + 0x04) << 10;
+    win_size = x86emu_read_word(emu, VBE_BUF + 0x06) << 10;
+
+    bpp = res_bpp = 0;
+
+    switch(x86emu_read_byte(emu, VBE_BUF + 0x1b)) {
+      case 0:
+        bpp = -1;
+        break;
+
+      case 1:
+        bpp = 2;
+        break;
+
+      case 2:
+        bpp = 1;
+        break;
+
+      case 3:
+        bpp = 4;
+        break;
+
+      case 4:
+        bpp = 8;
+        break;
+
+      case 6:
+        bpp = x86emu_read_byte(emu, VBE_BUF + 0x1f) +
+          x86emu_read_byte(emu, VBE_BUF + 0x21) +
+          x86emu_read_byte(emu, VBE_BUF + 0x23);
+        res_bpp = x86emu_read_byte(emu, VBE_BUF + 0x19) - bpp;
+        if(res_bpp < 0) res_bpp = 0;
+    }
+
+    fb_start = version >= 0x0200 ? x86emu_read_dword(emu, VBE_BUF + 0x28) : 0;
+
+    pixel_clock = version >= 0x0300 ? x86emu_read_dword(emu, VBE_BUF + 0x3e) : 0;
+
+    if(bpp == -1u) {
+      printf("  0x%04x[%02x]: %ux%u, text\n", number, attributes, width, height);
+    }
+    else {
+      *s = 0;
+      if(res_bpp) sprintf(s, "+%d", res_bpp);
+      printf("  0x%04x[%02x]: %ux%u+%u, %u%s bpp",
+        number, attributes, width, height, bytes_p_line, bpp, s
+      );
+
+      if(pixel_clock) printf(", max. %u MHz", pixel_clock/1000000);
+      if(fb_start) printf(", fb: 0x%08x", fb_start);
+      printf(", %04x.%x", win_A_start, win_A_attr);
+      if(win_B_start || win_B_attr) printf("/%04x.%x", win_B_start, win_B_attr);
+      printf(": %uk", win_size >> 10);
+      if(win_gran != win_size) printf("/%uk", win_gran >> 10);
+      printf("\n");
+    }
+  }
+
+#endif
+}
