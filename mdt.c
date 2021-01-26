@@ -19,14 +19,17 @@
 
 #define STR_SIZE 128
 
+#define VBIOS_MEM	0xa0000
+#define VBIOS_MEM_SIZE	0x10000
+
 #define VBIOS_ROM	0xc0000
 #define VBIOS_ROM_SIZE	0x10000
 
+#define VBIOS_GAP1	0xd0000
+#define VBIOS_GAP1_SIZE	0x20000
+
 #define SBIOS_ROM	0xf0000
 #define SBIOS_ROM_SIZE	0x10000
-
-#define VBIOS_MEM	0xa0000
-#define VBIOS_MEM_SIZE	0x10000
 
 #define VBE_BUF		0x8000
 
@@ -413,7 +416,7 @@ unsigned vm_run(x86emu_t *emu, double *t)
 {
   unsigned err;
 
-  if(opt.verbose >= 2) x86emu_log(emu, "=== emulation log ===\n");
+  if(opt.verbose >= 2) x86emu_log(emu, "=== emulation log %s===\n", opt.no_io ? "(no i/o) " : "");
 
   *t = get_time();
 
@@ -659,6 +662,9 @@ int vm_prepare(vm_t *vm)
 
   // stack & buffer space
   x86emu_set_perm(vm->emu, VBE_BUF, 0xffff, X86EMU_PERM_RW);
+
+  // make memory between mapped VBIOS ROM areas writable
+  x86emu_set_perm(vm->emu, VBIOS_GAP1, VBIOS_GAP1 + VBIOS_GAP1_SIZE - 1, X86EMU_PERM_RW);
 
   vm->emu->log.trace = opt.trace_flags;
 
