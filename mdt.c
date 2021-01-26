@@ -33,6 +33,18 @@
 
 #define VBE_BUF		0x8000
 
+/*
+ * I/O loop detection (if opt.no_io is set)
+ *
+ * IO_LOOP_MAX_SIZE: max number of instructions between reading the same I/O port
+ *   again (and no other I/O in between)
+ *
+ * IO_LOOP_MIN_MATCHES: at least this number of read accesses will return 0 before
+ *   starting to emulate a counter
+ */
+#define IO_LOOP_MAX_SIZE	20
+#define IO_LOOP_MIN_MATCHES	50
+
 #define ADD_RES(w, h, f, i) \
   res[res_cnt].width = w, \
   res[res_cnt].height = h, \
@@ -43,6 +55,12 @@ typedef struct {
   x86emu_t *emu;
   unsigned char *video_mem;
   x86emu_memio_handler_t old_memio;
+  struct {
+    u64 last_tsc;
+    u32 last_addr;
+    u32 value;
+    unsigned matched;
+  } io_loop;
 } vm_t;
 
 
@@ -442,13 +460,42 @@ unsigned vm_run(x86emu_t *emu, double *t)
 }
 
 
+/*
+ * I/O emulation used if opt.no_io is set. Otherwise real port accesses are done.
+ *
+ * The emulated I/O always returns 0. Unless a close loop reading a specific
+ * port is detected. In that case it starts to emulate a counter on this
+ * specific port, assuming the code waits for something to change.
+ *
+ * Reading any other port in between resets the logic.
+ *
+ * The detailed behavior is controlled by IO_LOOP_MAX_SIZE and IO_LOOP_MIN_MATCHES.
+ */
 unsigned new_memio(x86emu_t *emu, u32 addr, u32 *val, unsigned type)
 {
   vm_t *vm = emu->private;
   unsigned err = 0;
 
   if((type & ~0xff) == X86EMU_MEMIO_I) {
-    *val = 0;
+    // tsc is incremented by 1 on each instruction in x86emu
+    u64 tsc = emu->x86.R_TSC;
+
+    if(addr == vm->io_loop.last_addr && tsc - vm->io_loop.last_tsc < IO_LOOP_MAX_SIZE) {
+      if(vm->io_loop.matched > IO_LOOP_MIN_MATCHES) {
+        vm->io_loop.value++;
+      }
+      else {
+        vm->io_loop.matched++;
+      }
+    }
+    else {
+      vm->io_loop.matched = 0;
+      vm->io_loop.value = 0;
+    }
+    vm->io_loop.last_addr = addr;
+    vm->io_loop.last_tsc = tsc;
+
+    *val = vm->io_loop.value;
   }
   else if((type & ~0xff) == X86EMU_MEMIO_O) {
   }
