@@ -1202,6 +1202,9 @@ void print_edid(int port, unsigned char *edid)
   m.vendor_id = (edid[8] << 8) + edid[9];
   m.product_id = (edid[0xb] << 8) + edid[0xa];
 
+  u = edid[12] + (edid[13] << 8) + (edid[14] << 16) + (edid[15] << 24);
+  sprintf(m.serial, "%u", u);
+
   if(edid[0x15] > 0 && edid[0x16] > 0) {
     m.width_mm = edid[0x15] * 10;
     m.height_mm = edid[0x16] * 10;
@@ -1283,7 +1286,7 @@ void print_edid(int port, unsigned char *edid)
         break;
 
       case 0xff:
-        if(!*m.serial && edid[i + 5]) {
+        if(edid[i + 5]) {
           memcpy(m.serial, canon_str(edid + i + 5, 0xd), sizeof m.serial);
           for(s = m.serial; *s; s++) if(*s < ' ') *s = ' ';
         }
@@ -1382,7 +1385,8 @@ void print_edid(int port, unsigned char *edid)
   }
   if(m.lcd) lprintf(" [LCD]");
 
-  lprintf("\nManuf. Year: %u\n", m.year);
+  lprintf("\nSerial: %s\n", m.serial);
+  lprintf("Manuf. Year: %u\n", m.year);
 
   if(mi_cnt) {
     u1 = mi_list[0].width_mm;
