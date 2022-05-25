@@ -30,7 +30,7 @@ mdt_dos.iso: mdt.com
 	# fat16: type 0x0e, freedos_boot.fat16
 	./hdimage \
 	  --size 1000 --chs 0 4 63 --type 0x01 \
-	  --mbr /usr/lib/boot/master-boot-code \
+	  --mbr /usr/share/syslinux/mbr.bin \
 	  --mkfs fat --label MONITOR --boot-block dosfiles/freedos_boot.fat12 \
 	  mdt.img
 	mcopy -i 'mdt.img|partition=1' \
@@ -42,7 +42,7 @@ mdt_dos.iso: mdt.com
 	cp dosfiles/isolinux.cfg tmp
 	cp /usr/share/syslinux/memdisk tmp
 	cp /usr/share/syslinux/isolinux.bin tmp
-	genisoimage -o $@ -f \
+	mkisofs -o $@ -f \
 	  -no-emul-boot -boot-load-size 4 -boot-info-table -b isolinux.bin \
 	  -hide boot.catalog \
 	  tmp
@@ -51,7 +51,7 @@ mdt.iso: mdt.bin
 	rm -rf tmp
 	mkdir tmp
 	cp $< tmp
-	genisoimage -o $@ -f -no-emul-boot -hide boot.catalog -b $< tmp
+	mkisofs -o $@ -f -no-emul-boot -hide boot.catalog -b $< tmp
 
 mdt: mdt.c
 	$(CC) $(CFLAGS) $< -lx86emu -o $@
