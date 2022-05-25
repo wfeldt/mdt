@@ -1,3 +1,9 @@
+25/5/2022:	v1.7
+	- improve getting video mode info (bsc#1181101)
+	- try harder to break out of infinite I/O loops
+	- don't map video bios memory if --no-io is used
+	- added --no-io option that disables all port access
+
 23/3/2012:	v1.6
 	- add option to map also system bios
 	- select int 0x10, 0x6d or 0x42 whichever might work best
